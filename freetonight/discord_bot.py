@@ -513,13 +513,26 @@ class FreeTonightBot(commands.Bot):
         register_commands(self)
 
     async def setup_hook(self) -> None:
-        guild_id = os.environ.get("DISCORD_GUILD_ID")
-        if guild_id:
-            guild = discord.Object(id=int(guild_id))
-            self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-        else:
-            await self.tree.sync()
+        guild_id = os.environ.get("DISCORD_GUILD_ID", "").strip()
+        try:
+            if guild_id:
+                guild = discord.Object(id=int(guild_id))
+                self.tree.copy_global_to(guild=guild)
+                await self.tree.sync(guild=guild)
+                log.info("Slash commands ready in server %s", guild_id)
+            else:
+                await self.tree.sync()
+                log.info("Slash commands synced globally (can take up to an hour to appear)")
+        except ValueError:
+            raise SystemExit(f"DISCORD_GUILD_ID should be your server's number, got {guild_id!r}.") from None
+        except discord.Forbidden:
+            raise SystemExit(
+                "Discord said Missing Access while adding slash commands to server "
+                f"{guild_id or '(global)'}.\n"
+                "Fix: in the Developer Portal open OAuth2 > URL Generator, tick both 'bot' and "
+                "'applications.commands', open the generated URL and add the bot to that server again.\n"
+                "Also check DISCORD_GUILD_ID is the ID of the server the bot is in "
+                "(right-click the server > Copy Server ID).") from None
 
     async def close(self) -> None:
         self.store.close()
