@@ -149,7 +149,7 @@ class SetupPanel(discord.ui.View):
         return Profile(name=user.display_name, user_id=str(user.id), commitments=commitments,
                        budget=self.budget, diet=[f[5:] for f in self.food if f.startswith("diet:")],
                        allergies=[f[3:] for f in self.food if f.startswith("no:")],
-                       max_walk_min=base.max_walk_min, earliest=earliest, latest=base.latest,
+                       max_walk_min=max(1, min(60, base.max_walk_min)), earliest=earliest, latest=base.latest,
                        no_go_days=list(base.no_go_days), free_blocks=sorted(self.free, key=_slot_order),
                        calendar_url=self.calendar_url)
 
