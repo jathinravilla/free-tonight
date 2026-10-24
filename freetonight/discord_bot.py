@@ -880,8 +880,15 @@ def main() -> None:
     token = os.environ.get("DISCORD_TOKEN")
     if not token:
         raise SystemExit("Set DISCORD_TOKEN (see README: 'Run the Discord bot').")
+    token = token.strip().strip('"').strip("'")
+    if token in ("...", "YOUR_BOT_TOKEN") or " " in token:
+        raise SystemExit("DISCORD_TOKEN still holds the placeholder. Paste your bot token right after the = sign.")
     bot = FreeTonightBot(os.environ.get("FREETONIGHT_DB", "freetonight.db"), os.environ.get("FREETONIGHT_VENUES"))
-    bot.run(token, log_handler=None)
+    try:
+        bot.run(token, log_handler=None)
+    except discord.LoginFailure:
+        raise SystemExit("Discord rejected the token. In the Developer Portal open your app → Bot → Reset Token, "
+                         "then run: export DISCORD_TOKEN=<the new token>") from None
 
 
 if __name__ == "__main__":
