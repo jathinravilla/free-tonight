@@ -26,8 +26,11 @@ Built for the [Cubbie Hackathon](https://hackathon.cubbie.ai), Track 3 (Group Ch
 
 ## How a plan happens
 
-1. **Setup, once, privately.** `/setup` opens a pop-up only you see: weekly schedule, budget, diet, allergies,
-   walk limit. Mark anything flexible with `(flex 30)`.
+1. **Setup, once, privately, in about 15 seconds.** `/setup` shows a card only you see: tap when you're usually
+   free (like "Tue evening"), anything you can't eat, and your budget. Or **link Google Calendar** (its secret iCal
+   address) and busy times fill in by themselves, fresh every plan. Or **type your week** in any format; lines it
+   can't read are skipped, and with an Anthropic key Claude reads the messy ones. Mark anything flexible with
+   `(flex 30)`.
 2. **Kickoff.** Someone types `/plan dinner weeknights` in the group channel. Friends tap **I'm in**. The host
    taps **Start**.
 3. **Round 1, availability.** Each agent puts free windows on the table. Never class names, never reasons.
@@ -95,7 +98,7 @@ python3 -m freetonight parse "MWF 9-10:15 CS 201; Tue 6-8pm study group (flex 30
 
 | Command | What it does |
 | --- | --- |
-| `/setup` | Your private profile (pop-up only you see) |
+| `/setup` | Your private profile: tap free times and food, link a calendar, or type it (only you see it) |
 | `/plan activity when [minutes]` | Start a plan in this channel |
 | `/split` | Split a bill: even, or itemized with tax and tip, to the cent |
 | `/profile` | See, edit or delete what your agent knows |
@@ -133,10 +136,11 @@ freetonight/
   llm.py           Optional Claude fallback for schedules the parser can't read
   split.py         Bill split to the cent
   cards.py         Copy card and .ics invite
-  discord_bot.py   Slash commands, pop-ups, DM questions, live plan card, poll, buttons
+  calendar_feed.py Busy times from a private calendar link (free/busy only)
+  discord_bot.py   Slash commands, tap-to-pick setup, DM questions, live plan card, poll, buttons
   store.py         SQLite, one row per person
 cubbie-skill/      The Cubbie Skill (SKILL.md + scripts/ft_card.py)
-tests/             27 tests, including a full /plan run against fake Discord members
+tests/             30 tests, including a full /plan run against fake Discord members
 ```
 
 Decisions are deterministic code, so a demo never hangs on a model call. Claude is used only where language is
@@ -153,6 +157,8 @@ python3 -m unittest discover -s tests
 - The bot never pings `@everyone`, `@here` or roles, whatever text ends up in a message.
 - Only the host can start or cancel a plan, only plan members can vote, and only the asked person can answer
   their own question. Plans are capped at 25 people.
+- A linked calendar is read for start and end times only; event names, places and notes are never read or stored.
+  Only Google, Outlook and iCloud calendar links are accepted, so a pasted link can't point the bot anywhere else.
 - Claude only sees the schedule text a person typed into their own `/setup`; its answer must match a strict schema
   and is re-checked by the normal parser.
 - Friends' Cubbie cards are untrusted: codes are size-limited, unknown fields are dropped, names are plain text, and

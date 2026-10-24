@@ -169,12 +169,16 @@ class DiscordBotTests(unittest.TestCase):
                 None)
             run = bot.runs[channel.id]
             joined = await press(it.view, "I'm in", friend, channel)
-            self.assertEqual(joined.log, ["modal"])  # no profile yet: setup pop-up first
-            m = joined.modal
-            m.schedule._value, m.budget._value = "TR 5-7pm lab", "20"
-            m.diet._value = m.allergies._value = m.extras._value = ""
-            await m.on_submit(FakeInteraction(friend, channel))
+            panel = joined.view  # no profile yet: the tap-to-pick setup card comes first
+            self.assertIsInstance(panel, db.SetupPanel)
+            panel.free = ["Sat evening", "Sat late night", "Sun afternoon"]
+            food = FakeInteraction(friend, channel)
+            food.data = {"values": ["diet:vegetarian", "no:peanut"]}
+            await panel._on_food(food)
+            await press(panel, "Save", friend, channel)
             self.assertIn(friend.id, run.members)
+            saved = bot.store.get("2")
+            self.assertEqual((saved.diet, saved.allergies), (["vegetarian"], ["peanut"]))
             await press(run.view(), "Start", host, channel)
             for _ in range(200):
                 await asyncio.sleep(0.01)
@@ -193,6 +197,22 @@ class DiscordBotTests(unittest.TestCase):
         self.assertEqual(sorted(run.result.confirmed), ["Pause", "akshara"])
         self.assertNotIn(channel.id, run.bot.runs)  # channel is free for the next /plan
         self.assertTrue(any("Check your DMs" in (c or "") for c, _ in channel.sent))
+
+    def test_typed_setup_is_forgiving(self):
+        async def go():
+            bot = db.FreeTonightBot(self.dbpath)
+            m = db.SetupModal(bot)
+            m.schedule._value = "MWF 9-10:15 CS 201\nclass on mondays sometimes\nTue 6-8pm gym"
+            m.budget._value, m.food._value = "", "veggie, no peanuts, pizza"
+            m.walk._value, m.hours._value = "15", "11am - 11pm"
+            await m.on_submit(FakeInteraction(FakeMember(5, "Sam"), FakeChannel()))
+            p = bot.store.get("5")
+            await bot.close()
+            return p
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
+            p = asyncio.run(go())
+        self.assertEqual(len(p.commitments), 2)  # the unreadable line is skipped, not fatal
+        self.assertEqual((p.diet, p.allergies, p.max_walk_min, p.latest), (["vegetarian"], ["peanut"], 15, "23:00"))
 
     def test_split_modal_and_poll_embed(self):
         async def go():

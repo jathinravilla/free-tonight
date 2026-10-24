@@ -55,6 +55,8 @@ class Profile:
     latest: str = "23:30"
     no_go_days: list[int] = field(default_factory=list)
     user_id: str = ""
+    free_blocks: list[str] = field(default_factory=list)  # what they tapped in setup, e.g. "Tue evening"
+    calendar_url: str = ""  # private iCal link; read for free/busy only, never shared
 
     def busy_on(self, d: date) -> list[tuple[Interval, Commitment]]:
         out = []
@@ -72,7 +74,8 @@ class Profile:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Profile":
-        data = dict(data)
+        known = set(cls.__dataclass_fields__)
+        data = {k: v for k, v in data.items() if k in known}
         data["commitments"] = [Commitment(**c) for c in data.get("commitments", [])]
         return cls(**data)
 
@@ -122,6 +125,47 @@ def parse_schedule(text: str) -> list[Commitment]:
             raise ValueError(f"Couldn't read: {raw.strip()!r} ({exc}).") from None
         out.append(Commitment(days=days, start=start.strftime("%H:%M"), end=end.strftime("%H:%M"),
                               label=m.group("label").strip(), flex_minutes=flex))
+    return out
+
+
+def parse_schedule_loose(text: str) -> tuple[list[Commitment], list[str]]:
+    """Like parse_schedule, but keeps every line it can read and returns the ones it couldn't."""
+    out, skipped = [], []
+    for raw in re.split(r"[;\n]+", text):
+        if not raw.strip(" -•*\t"):
+            continue
+        try:
+            out.extend(parse_schedule(raw))
+        except ValueError:
+            skipped.append(raw.strip())
+    return out, skipped
+
+
+# Tap-to-pick setup: the parts of a day someone can say they're usually free.
+BLOCKS = {"morning": ("08:00", "12:00"), "afternoon": ("12:00", "17:00"),
+          "evening": ("17:00", "21:00"), "late night": ("21:00", "23:59")}
+
+
+def busy_from_free(free: list[str]) -> list[Commitment]:
+    """Turn picks like ["Tue evening", "Sat afternoon"] into busy blocks for everything not picked.
+
+    Nothing picked means "no info", so no busy blocks.
+    """
+    if not free:
+        return []
+    picked = {tuple(f.split(" ", 1)) for f in free}
+    out = []
+    for d, day in enumerate(DAYS):
+        run: list[str] | None = None
+        for name, (s, e) in BLOCKS.items():
+            if (day, name) in picked:
+                if run:
+                    out.append(Commitment(days=[d], start=run[0], end=run[1], label="busy"))
+                    run = None
+            else:
+                run = [run[0] if run else s, e]
+        if run:
+            out.append(Commitment(days=[d], start=run[0], end=run[1], label="busy"))
     return out
 
 

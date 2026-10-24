@@ -12,17 +12,20 @@ import asyncio
 import io
 import logging
 import os
-from datetime import datetime
+import re
+from datetime import datetime, time, timedelta
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from . import cards, ledger_html
+from . import calendar_feed, cards, ledger_html
 from .agent import OwnerQuestion, PersonalAgent
 from .llm import parse_schedule_smart
 from .negotiation import ACTIVITIES, PlanResult, PlanSession
-from .profile import Profile, clock_ok, parse_allergies, parse_diet, parse_money, upcoming_dates
+from .profile import (ALLERGENS, BLOCKS, DIET_TAGS, Profile, busy_from_free, clock_ok, parse_allergies,
+                      parse_diet, parse_money, upcoming_dates)
+from .timeutil import DAYS
 from .split import format_split, split_bill, split_even
 from .store import ProfileStore
 from .timeutil import fmt_clock
@@ -62,52 +65,220 @@ STAGES = [
 
 # ---------------------------------------------------------------- profile setup
 
-class SetupModal(discord.ui.Modal, title="Your private agent"):
+WEEKDAY_SLOTS = [f"{d} {b}" for d in DAYS[:5] for b in BLOCKS]
+WEEKEND_SLOTS = [f"{d} {b}" for d in DAYS[5:] for b in BLOCKS]
+FOOD_OPTIONS = ([(f"diet:{d}", d.capitalize(), "I need options for this") for d in sorted(DIET_TAGS)]
+                + [(f"no:{a}", f"No {a}", "Allergic or can't eat it") for a in sorted(ALLERGENS)])
+BUDGETS = [10, 15, 20, 30, 50, 100]
+
+
+def _loose(text: str, parse) -> tuple[list[str], list[str]]:
+    """Read a comma list, keeping what's known and returning what isn't, instead of failing."""
+    ok, unknown = [], []
+    for part in re.split(r"[,;/\n]+|\band\b", text or ""):
+        if not part.strip():
+            continue
+        try:
+            ok += [x for x in parse(part) if x not in ok]
+        except ValueError:
+            unknown.append(part.strip())
+    return ok, unknown
+
+
+class SetupPanel(discord.ui.View):
+    """Tap-to-pick setup: free times, food, budget, with a calendar link and typing as options."""
+
+    def __init__(self, bot: "FreeTonightBot", existing: Profile | None = None, after=None):
+        super().__init__(timeout=900)
+        self.bot, self.existing, self.after = bot, existing, after
+        self.free = list(existing.free_blocks) if existing else []
+        self.food = ([f"diet:{d}" for d in existing.diet] + [f"no:{a}" for a in existing.allergies]) if existing else []
+        self.budget = existing.budget if existing else 20.0
+        self.calendar_url = existing.calendar_url if existing else ""
+        self._select(WEEKDAY_SLOTS, "When are you usually free on weekdays?", "free_wd", 0)
+        self._select(WEEKEND_SLOTS, "When are you usually free on weekends?", "free_we", 1)
+        food = discord.ui.Select(placeholder="Food: anything you need or can't eat (optional)", min_values=0,
+                                 max_values=len(FOOD_OPTIONS), row=2, options=[
+                                     discord.SelectOption(label=label, value=v, description=desc,
+                                                          default=v in self.food)
+                                     for v, label, desc in FOOD_OPTIONS])
+        food.callback = self._on_food
+        self.add_item(food)
+        budget = discord.ui.Select(placeholder="Most you'd spend per hangout", row=3, options=[
+            discord.SelectOption(label=f"Up to ${b}" if b < 100 else "$100+ (no real limit)", value=str(b),
+                                 default=abs(self.budget - b) < 0.01) for b in BUDGETS])
+        budget.callback = self._on_budget
+        self.add_item(budget)
+
+    @staticmethod
+    def embed() -> discord.Embed:
+        return discord.Embed(title="🔒 Set up your private agent", colour=PURPLE, description=(
+            "Tap what applies, then **Save**. Only you can see this, and only free/busy ever leaves your agent.\n\n"
+            "📅 **Use Google Calendar?** Link it and your busy times fill in by themselves.\n"
+            "⌨️ Rather type? Write your week however you like."))
+
+    def _select(self, slots: list[str], placeholder: str, key: str, row: int) -> None:
+        sel = discord.ui.Select(placeholder=placeholder, min_values=0, max_values=len(slots), row=row, options=[
+            discord.SelectOption(label=s, value=s, description=_block_hours(s), default=s in self.free)
+            for s in slots])
+
+        async def cb(interaction: discord.Interaction):
+            mine = set(slots)
+            self.free = [f for f in self.free if f not in mine] + list(sel.values)
+            await interaction.response.defer()
+        sel.callback = cb
+        self.add_item(sel)
+
+    async def _on_food(self, interaction: discord.Interaction):
+        self.food = list(interaction.data.get("values", []))
+        await interaction.response.defer()
+
+    async def _on_budget(self, interaction: discord.Interaction):
+        self.budget = float(interaction.data.get("values", ["20"])[0])
+        await interaction.response.defer()
+
+    def build(self, user: discord.abc.User) -> Profile:
+        base = self.existing or Profile(name=user.display_name)
+        if self.free:
+            commitments = busy_from_free(self.free)
+        elif base.free_blocks:  # they un-picked everything
+            commitments = []
+        else:
+            commitments = list(base.commitments)
+        earliest = "08:00" if any(f.endswith("morning") for f in self.free) else base.earliest
+        return Profile(name=user.display_name, user_id=str(user.id), commitments=commitments,
+                       budget=self.budget, diet=[f[5:] for f in self.food if f.startswith("diet:")],
+                       allergies=[f[3:] for f in self.food if f.startswith("no:")],
+                       max_walk_min=base.max_walk_min, earliest=earliest, latest=base.latest,
+                       no_go_days=list(base.no_go_days), free_blocks=sorted(self.free, key=_slot_order),
+                       calendar_url=self.calendar_url)
+
+    @discord.ui.button(label="Save", emoji="✅", style=discord.ButtonStyle.success, row=4)
+    async def save(self, interaction: discord.Interaction, _: discord.ui.Button):
+        profile = self.build(interaction.user)
+        self.bot.store.put(profile)
+        self.stop()
+        embed = profile_embed(profile, "🔒 Saved privately")
+        if not (profile.commitments or profile.calendar_url):
+            embed.set_footer(text="Tip: pick your free times or link your calendar, or your agent assumes you're "
+                                  "free all week. /setup any time to change it.")
+        await interaction.response.edit_message(embed=embed, view=None)
+        if self.after:
+            await self.after(interaction, profile)
+
+    @discord.ui.button(label="Link Google Calendar", emoji="📅", style=discord.ButtonStyle.primary, row=4)
+    async def link(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(CalendarModal(self))
+
+    @discord.ui.button(label="Type it instead", emoji="⌨️", style=discord.ButtonStyle.secondary, row=4)
+    async def typed(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(SetupModal(self.bot, self.build(interaction.user), after=self.after))
+
+
+def _block_hours(slot: str) -> str:
+    start, end = BLOCKS[slot.split(" ", 1)[1]]
+    return f"{fmt_clock(time.fromisoformat(start))}–{'midnight' if end == '23:59' else fmt_clock(time.fromisoformat(end))}"
+
+
+def _slot_order(slot: str) -> tuple[int, int]:
+    day, block = slot.split(" ", 1)
+    return DAYS.index(day), list(BLOCKS).index(block)
+
+
+class CalendarModal(discord.ui.Modal, title="Link your calendar"):
+    url = discord.ui.TextInput(label="Secret address in iCal format", max_length=500, required=False,
+                               placeholder="https://calendar.google.com/calendar/ical/.../basic.ics")
+
+    def __init__(self, panel: SetupPanel):
+        super().__init__()
+        self.panel = panel
+        if panel.calendar_url:
+            self.url.default = panel.calendar_url
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        text = self.url.value.strip()
+        if not text:
+            self.panel.calendar_url = ""
+            await interaction.followup.send("Calendar unlinked. Press **Save** to keep that.", ephemeral=True)
+            return
+        try:
+            url = calendar_feed.check_url(text)
+            today = datetime.now().date()
+            busy = await asyncio.to_thread(calendar_feed.busy_from_link, url,
+                                           [today + timedelta(days=i) for i in range(7)])
+        except ValueError as exc:
+            await interaction.followup.send(f"⚠️ {exc}\n\n{calendar_feed.HELP}", ephemeral=True)
+            return
+        self.panel.calendar_url = url
+        await interaction.followup.send(
+            f"📅 Linked. I see **{len(busy)} busy blocks** in the next 7 days. Your agent re-reads it every time "
+            "you plan. Only start and end times are read; event names are never read or stored.\n"
+            "Now press **Save** on the setup card.", ephemeral=True)
+
+
+class SetupModal(discord.ui.Modal, title="Type your week"):
     schedule = discord.ui.TextInput(
-        label="Weekly schedule (only free/busy is shared)", style=discord.TextStyle.paragraph,
+        label="When are you busy? Any format", style=discord.TextStyle.paragraph,
         placeholder="MWF 9-10:15 CS 201\nTue 6-8pm study group (flex 30)\nThu 5-7:30pm work shift",
         required=False, max_length=1500)
-    budget = discord.ui.TextInput(label="Most you'd spend per hangout ($)", placeholder="15", max_length=10)
-    diet = discord.ui.TextInput(label="Diet (optional)", placeholder="vegetarian, halal, vegan, gluten-free...",
-                                required=False, max_length=100)
-    allergies = discord.ui.TextInput(label="Allergies (optional)", placeholder="peanut, shellfish...",
-                                     required=False, max_length=100)
-    extras = discord.ui.TextInput(label="Max walk (min) and hangout hours", placeholder="20, 11am-11:30pm",
-                                  required=False, max_length=40)
+    budget = discord.ui.TextInput(label="Most you'd spend per hangout ($)", placeholder="20", max_length=10,
+                                  required=False)
+    food = discord.ui.TextInput(label="Food needs or allergies (optional)", required=False, max_length=150,
+                                placeholder="vegetarian, halal, no peanuts...")
+    walk = discord.ui.TextInput(label="Max walk in minutes (optional)", placeholder="20", required=False,
+                                max_length=3)
+    hours = discord.ui.TextInput(label="Hangout hours (optional)", placeholder="11am-11:30pm", required=False,
+                                 max_length=30)
 
     def __init__(self, bot: "FreeTonightBot", existing: Profile | None = None, after=None):
         super().__init__()
-        self.bot = bot
+        self.bot, self.existing = bot, existing
         self.after = after  # coroutine(interaction, profile) run after a successful save
         if existing:
-            self.schedule.default = "\n".join(
-                f"{'/'.join(['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][d] for d in c.days)} {c.start}-{c.end} "
-                f"{c.label}" + (f" (flex {c.flex_minutes})" if c.flex_minutes else "")
-                for c in existing.commitments)[:1500]
+            if not existing.free_blocks:
+                self.schedule.default = "\n".join(
+                    f"{'/'.join(DAYS[d] for d in c.days)} {c.start}-{c.end} {c.label}"
+                    + (f" (flex {c.flex_minutes})" if c.flex_minutes else "")
+                    for c in existing.commitments if not c.on_date)[:1500]
             self.budget.default = f"{existing.budget:g}"
-            self.diet.default = ", ".join(existing.diet)
-            self.allergies.default = ", ".join(existing.allergies)
-            self.extras.default = f"{existing.max_walk_min}, {existing.earliest}-{existing.latest}"
+            self.food.default = ", ".join(existing.diet + [f"no {a}" for a in existing.allergies])
+            self.walk.default = str(existing.max_walk_min)
+            self.hours.default = f"{existing.earliest}-{existing.latest}"
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         # Reading a messy schedule can call Claude, which takes longer than Discord's 3-second reply window.
         await interaction.response.defer(ephemeral=True, thinking=True)
+        base = self.existing or Profile(name=interaction.user.display_name)
+        notes = []
         try:
-            commitments, how = (await asyncio.to_thread(parse_schedule_smart, self.schedule.value)
-                                if self.schedule.value.strip() else ([], ""))
-            profile = Profile(name=interaction.user.display_name, commitments=commitments,
-                              budget=parse_money(self.budget.value), diet=parse_diet(self.diet.value),
-                              allergies=parse_allergies(self.allergies.value), user_id=str(interaction.user.id))
-            if self.extras.value.strip():
-                walk, _, hours = self.extras.value.partition(",")
-                if walk.strip():
-                    profile.max_walk_min = int(parse_money(walk))
-                    if not 1 <= profile.max_walk_min <= 60:
-                        raise ValueError(f"Walk limit should be 1 to 60 minutes, not {profile.max_walk_min}. "
-                                         "Write it first, like `15, 11am-11:30pm`.")
-                if hours.strip():
-                    a, _, b = hours.strip().partition("-")
-                    profile.earliest, profile.latest = clock_ok(a), clock_ok(b)
+            if self.schedule.value.strip():
+                commitments, how, skipped = await asyncio.to_thread(parse_schedule_smart, self.schedule.value)
+                free_blocks: list[str] = []
+            else:
+                commitments, how, skipped, free_blocks = list(base.commitments), "", [], list(base.free_blocks)
+            if skipped:
+                notes.append("Couldn't read: " + "; ".join(f"“{s[:60]}”" for s in skipped[:5])
+                             + ". Try like `Tue 6-8pm gym`.")
+            food = re.sub(r"\b(no|not|allergic to|allergy)\b", "", self.food.value, flags=re.I)
+            diet, unknown_d = _loose(food, parse_diet)
+            allergies, unknown_a = _loose(food, parse_allergies)
+            unknown = [u for u in unknown_d if u in unknown_a]
+            if unknown:
+                notes.append("Skipped food I don't know: " + ", ".join(unknown[:5]))
+            profile = Profile(name=interaction.user.display_name, user_id=str(interaction.user.id),
+                              commitments=commitments, free_blocks=free_blocks,
+                              budget=parse_money(self.budget.value) if self.budget.value.strip() else base.budget,
+                              diet=diet, allergies=allergies, max_walk_min=base.max_walk_min,
+                              earliest=base.earliest, latest=base.latest, no_go_days=list(base.no_go_days),
+                              calendar_url=base.calendar_url)
+            if self.walk.value.strip():
+                profile.max_walk_min = int(parse_money(self.walk.value))
+                if not 1 <= profile.max_walk_min <= 60:
+                    raise ValueError(f"Walk limit should be 1 to 60 minutes, not {profile.max_walk_min}.")
+            if self.hours.value.strip():
+                a, _, b = self.hours.value.replace("–", "-").replace(" to ", "-").partition("-")
+                profile.earliest, profile.latest = clock_ok(a), clock_ok(b)
         except ValueError as exc:
             await interaction.followup.send(f"⚠️ {exc}\nNothing was saved.", ephemeral=True,
                                             view=RetrySetupView(self.bot, self))
@@ -115,7 +286,9 @@ class SetupModal(discord.ui.Modal, title="Your private agent"):
         self.bot.store.put(profile)
         embed = profile_embed(profile, "🔒 Saved privately")
         if how == "claude":
-            embed.set_footer(text="Claude read your schedule. Check it looks right.")
+            notes.append("Claude read your schedule. Check it looks right.")
+        if notes:
+            embed.set_footer(text="\n".join(notes)[:2000])
         await interaction.followup.send(embed=embed, ephemeral=True)
         if self.after:
             await self.after(interaction, profile)
@@ -128,20 +301,39 @@ class RetrySetupView(discord.ui.View):
 
     @discord.ui.button(label="Fix and try again", style=discord.ButtonStyle.primary)
     async def retry(self, interaction: discord.Interaction, _: discord.ui.Button):
-        fresh = SetupModal(self.bot, after=self.modal.after)
-        for field in ("schedule", "budget", "diet", "allergies", "extras"):
+        fresh = SetupModal(self.bot, self.modal.existing, after=self.modal.after)
+        for field in ("schedule", "budget", "food", "walk", "hours"):
             getattr(fresh, field).default = getattr(self.modal, field).value
         await interaction.response.send_modal(fresh)
+
+
+async def send_setup(interaction: discord.Interaction, bot: "FreeTonightBot", after=None) -> None:
+    """Show the tap-to-pick setup card, privately."""
+    await interaction.response.send_message(embed=SetupPanel.embed(), ephemeral=True,
+                                            view=SetupPanel(bot, bot.store.get(str(interaction.user.id)), after))
+
+
+def _free_summary(blocks: list[str]) -> str:
+    by_day: dict[str, list[str]] = {}
+    for b in blocks:
+        day, part = b.split(" ", 1)
+        by_day.setdefault(day, []).append(part)
+    return "\n".join(f"{day}: {', '.join(parts)}" for day, parts in by_day.items())
 
 
 def profile_embed(p: Profile, title: str) -> discord.Embed:
     e = discord.Embed(title=title, colour=PURPLE,
                       description="Only you can see this. Your agent shares free/busy times, pooled filters "
                                   "and yes/no answers, never these details.")
-    sched = "\n".join(c.describe() for c in p.commitments) or "Nothing yet"
+    if p.free_blocks:
+        name, sched = "Usually free", _free_summary(p.free_blocks)
+    else:
+        name, sched = "Busy", "\n".join(c.describe() for c in p.commitments) or "Nothing yet"
     if len(sched) > 1000:  # Discord rejects fields over 1024 characters
         sched = sched[:990].rsplit("\n", 1)[0] + "\n…and more"
-    e.add_field(name="Schedule", value=sched, inline=False)
+    e.add_field(name=name, value=sched, inline=False)
+    if p.calendar_url:
+        e.add_field(name="Calendar", value="📅 Linked (free/busy only)", inline=False)
     e.add_field(name="Budget", value=f"up to ${p.budget:.0f}")
     e.add_field(name="Walk", value=f"up to {p.max_walk_min} min")
     e.add_field(name="Food", value=", ".join(p.diet + [f"no {a}" for a in p.allergies]) or "anything")
@@ -155,7 +347,7 @@ class ProfileView(discord.ui.View):
 
     @discord.ui.button(label="Edit", style=discord.ButtonStyle.primary, emoji="✏️")
     async def edit(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await interaction.response.send_modal(SetupModal(self.bot, self.profile))
+        await send_setup(interaction, self.bot)
 
     @discord.ui.button(label="Delete my data", style=discord.ButtonStyle.danger)
     async def delete(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -289,8 +481,12 @@ class PlanRun:
         self.stage = "gathering"
         await self.refresh()
         agents = []
+        now = datetime.now()
+        dates = upcoming_dates(now.date(), self.when)
+        profiles = {uid: self.bot.store.get(str(uid)) for uid in self.members}
+        await self._read_calendars(profiles, dates)
         for uid, member in self.members.items():
-            profile = self.bot.store.get(str(uid))
+            profile = profiles[uid]
             profile.name = member.display_name
 
             def make_ask(m=member):
@@ -298,9 +494,8 @@ class PlanRun:
                     return await ask_member(m, self.channel, q, "no" if q.kind == "relax" else "maybe")
                 return ask
             agents.append(PersonalAgent(profile, make_ask()))
-        now = datetime.now()
         session = PlanSession(agents, self.host.display_name, self.activity,
-                              upcoming_dates(now.date(), self.when), self.bot.venues, minutes=self.minutes,
+                              dates, self.bot.venues, minutes=self.minutes,
                               now=now, progress=self.progress, poll=self.poll)
         try:
             self.result = await session.run()
@@ -320,6 +515,22 @@ class PlanRun:
                    else f" penciled in: **{self.result.plan.label}**. Nobody's a firm yes yet.")
                 + (" Calendar invite and bill split are on the card." if self.result.plan.venue
                    else " Pick a spot in chat; the calendar invite is on the card."))
+
+    async def _read_calendars(self, profiles: dict, dates) -> None:
+        """Add fresh busy times from linked calendars (this plan only; nothing is saved)."""
+        async def one(uid, p):
+            try:
+                p.commitments += await asyncio.to_thread(calendar_feed.busy_from_link, p.calendar_url, dates)
+            except Exception as exc:  # a broken link shouldn't stop the plan; use the saved schedule
+                log.warning("Calendar read failed for one member: %s", exc)
+                member = self.members.get(uid)
+                if member:
+                    try:
+                        await member.send("📅 I couldn't read your linked calendar this time, so I used your saved "
+                                          "free times. Run /setup to re-link it.")
+                    except discord.HTTPException:
+                        pass
+        await asyncio.gather(*[one(uid, p) for uid, p in profiles.items() if p and p.calendar_url])
 
     async def poll(self, options: list[str]) -> int:
         view = PollView(self, options)
@@ -370,7 +581,7 @@ class JoinView(discord.ui.View):
                     return
                 self.run.members[i.user.id] = i.user
                 await self.run.refresh()
-            await interaction.response.send_modal(SetupModal(self.run.bot, after=after))
+            await send_setup(interaction, self.run.bot, after)
             return
         self.run.members[interaction.user.id] = interaction.user
         await interaction.response.edit_message(embed=self.run.embed(), view=self)
@@ -600,7 +811,7 @@ def register_commands(bot: FreeTonightBot) -> None:
 
     @tree.command(name="setup", description="Set up your private agent (only you see this)")
     async def setup_cmd(interaction: discord.Interaction):
-        await interaction.response.send_modal(SetupModal(bot, bot.store.get(str(interaction.user.id))))
+        await send_setup(interaction, bot)
 
     @tree.command(name="profile", description="See or edit what your agent knows (only you see this)")
     async def profile_cmd(interaction: discord.Interaction):
@@ -641,7 +852,7 @@ def register_commands(bot: FreeTonightBot) -> None:
             async def after(i: discord.Interaction, profile: Profile):
                 bot.runs[interaction.channel_id] = run
                 run.message = await interaction.channel.send(embed=run.embed(), view=run.view())
-            await interaction.response.send_modal(SetupModal(bot, after=after))
+            await send_setup(interaction, bot, after)
             return
         bot.runs[interaction.channel_id] = run
         await interaction.response.send_message(embed=run.embed(), view=run.view())
@@ -655,7 +866,7 @@ def register_commands(bot: FreeTonightBot) -> None:
     async def help_cmd(interaction: discord.Interaction):
         e = discord.Embed(title="🌙 Free Tonight", colour=ORANGE, description=(
             "Everyone gets a private agent. Agents plan together; you only answer yes or no.\n\n"
-            "**/setup** your schedule, budget and food needs (only you see it)\n"
+            "**/setup** tap your free times and food, or link Google Calendar (only you see it)\n"
             "**/plan** start a hangout in this channel; friends tap I'm in\n"
             "**/split** split a bill to the cent\n"
             "**/profile** see or edit your agent · **/forget** delete it\n\n"

@@ -5,7 +5,7 @@ import json
 import logging
 import os
 
-from .profile import Commitment, parse_schedule
+from .profile import Commitment, parse_schedule, parse_schedule_loose
 
 log = logging.getLogger(__name__)
 MODEL = os.environ.get("FREETONIGHT_MODEL", "claude-opus-5-5")
@@ -42,18 +42,19 @@ Schedule:
 """
 
 
-def parse_schedule_smart(text: str) -> tuple[list[Commitment], str]:
-    """Returns (commitments, how). Tries the strict parser, then Claude if a key is set."""
+def parse_schedule_smart(text: str) -> tuple[list[Commitment], str, list[str]]:
+    """Returns (commitments, how, skipped_lines). Strict parser first, then Claude if a key is set, then
+    whatever lines the parser can read."""
     try:
-        return parse_schedule(text), "parser"
-    except ValueError as strict_error:
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            raise
-        try:
-            return _parse_with_claude(text), "claude"
-        except Exception as exc:  # network, refusal, bad output: fall back to the strict parser's message
-            log.warning("Claude schedule parse failed: %s", exc)
-            raise strict_error from None
+        return parse_schedule(text), "parser", []
+    except ValueError:
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            try:
+                return _parse_with_claude(text), "claude", []
+            except Exception as exc:  # network, refusal, bad output: fall back to the lines we can read
+                log.warning("Claude schedule parse failed: %s", exc)
+        commitments, skipped = parse_schedule_loose(text)
+        return commitments, "parser", skipped
 
 
 def _parse_with_claude(text: str) -> list[Commitment]:

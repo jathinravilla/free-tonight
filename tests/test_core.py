@@ -1,7 +1,7 @@
 import asyncio
 import json
 import unittest
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 from freetonight import cards, ledger_html
 from freetonight.agent import PersonalAgent, budget_bucket
@@ -161,6 +161,34 @@ class NegotiationTests(unittest.TestCase):
         path = os.path.join(tempfile.mkdtemp(), "p.db")
         ProfileStore(path).close()
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+    def test_calendar_feed_reads_busy_times_only(self):
+        from freetonight.calendar_feed import busy_from_ics, check_url
+        ics = "\r\n".join([
+            "BEGIN:VCALENDAR", "BEGIN:VEVENT", "DTSTART:20261005T090000", "DTEND:20261005T101500",
+            "RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;UNTIL=20261211T235959Z", "EXDATE:20261028T090000",
+            "SUMMARY:Secret class name", "END:VEVENT",
+            "BEGIN:VEVENT", "DTSTART;VALUE=DATE:20261027", "SUMMARY:Birthday", "END:VEVENT",
+            "BEGIN:VEVENT", "DTSTART:20261029T180000", "DTEND:20261029T200000", "TRANSP:TRANSPARENT",
+            "END:VEVENT", "END:VCALENDAR"])
+        week = [date(2026, 10, 26) + timedelta(days=i) for i in range(7)]
+        busy = busy_from_ics(ics, week)
+        self.assertEqual([(c.on_date, c.start, c.end) for c in busy],
+                         [("2026-10-26", "09:00", "10:15"), ("2026-10-30", "09:00", "10:15")])
+        self.assertNotIn("Secret", json.dumps([c.label for c in busy]))
+        for bad in ("http://calendar.google.com/x", "https://localhost/x", "https://evil.com/calendar.google.com",
+                    "file:///etc/passwd"):
+            with self.assertRaises(ValueError):
+                check_url(bad)
+        self.assertTrue(check_url("webcal://p01-caldav.icloud.com/x").startswith("https://"))
+
+    def test_free_picks_become_busy_blocks(self):
+        from freetonight.profile import busy_from_free
+        busy = busy_from_free(["Tue evening", "Tue late night"])
+        tue = [c for c in busy if c.days == [1]]
+        self.assertEqual([(c.start, c.end) for c in tue], [("08:00", "17:00")])
+        self.assertEqual(len(busy), 7)
+        self.assertEqual(busy_from_free([]), [])
 
     def test_budget_bucket(self):
         self.assertEqual(budget_bucket(12), 10)
