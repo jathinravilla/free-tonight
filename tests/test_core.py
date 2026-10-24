@@ -155,6 +155,13 @@ class NegotiationTests(unittest.TestCase):
         self.assertNotIn("TBD", r.plan.label)
         self.assertIn("maybe: A, B", cards.copy_card(r))
 
+    def test_profile_store_is_owner_only(self):
+        import os, stat, tempfile
+        from freetonight.store import ProfileStore
+        path = os.path.join(tempfile.mkdtemp(), "p.db")
+        ProfileStore(path).close()
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
     def test_budget_bucket(self):
         self.assertEqual(budget_bucket(12), 10)
         self.assertEqual(budget_bucket(15), 15)

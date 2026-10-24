@@ -10,19 +10,19 @@ what's needed: free/busy windows, pooled filters nobody can trace back to a pers
 person answers a couple of private questions, and the group gets one plan card with a time, a place, who's in, a
 calendar invite and a fair bill split.
 
-Built for the [Cubbie Hackathon](https://hackathon.cubbie.ai), Track 2 (Agent-to-Agent Coordination).
+Built for the [Cubbie Hackathon](https://hackathon.cubbie.ai), Track 3 (Group Chat Assistant).
 
 ![Privacy ledger](docs/ledger.png)
 
 ## What judges asked for, and where it is
 
-| Track 2 asks | Free Tonight |
+| Track 3 asks | Free Tonight |
 | --- | --- |
-| Agents for different students reach a shared outcome | One agent per friend; the host agent proposes, every agent judges proposals against its owner's private profile |
-| How agents handle conflicting constraints | No full overlap → agents privately ask their owners about *flexible* commitments ("leave study group 30 min early?"); budget, diet, allergy and distance clashes knock places out without saying whose constraint it was |
-| What they share | Free windows, pooled filters (budget rounded down to $5), yes/no. Shown line by line in the **privacy ledger** |
-| When they ask their students to confirm | Before trimming any commitment, and before locking the plan (yes / maybe / no) |
-| Why students would say "We need this" | It replaces 40 messages of "idk whenever" with two taps each |
+| An AI that joins a group chat and makes it more useful | Add the bot to a Discord server; `/plan dinner weeknights` turns "anyone free?" into one locked plan card, updated live in the channel |
+| Something students would actually invite into their group | Two taps each (I'm in, then yes/maybe/no), a one-tap tie poll, a calendar invite, a copy card for iMessage or GroupMe, and a bill split to the cent |
+| Tied to real campus life | Plans around class schedules, TA hours and shifts, plus campus budgets, dietary needs, allergies and walking distance |
+| Working prototype on a real scenario | Live Discord bot, a no-account terminal demo, and tests that run a full `/plan` against fake Discord members |
+| Multi-agent: conflicting constraints, what they share, when they confirm | Each friend gets a private agent. When nobody fits, agents ask their owner in a DM about *flexible* commitments ("leave study group 30 min early?"); budget, diet, allergy and distance clashes knock places out without saying whose they were. Only free windows, pooled filters (budget rounded down to $5) and yes/no answers are shared, shown line by line in the **privacy ledger**. Agents ask before trimming anything and before locking the plan |
 
 ## How a plan happens
 
@@ -136,7 +136,7 @@ freetonight/
   discord_bot.py   Slash commands, pop-ups, DM questions, live plan card, poll, buttons
   store.py         SQLite, one row per person
 cubbie-skill/      The Cubbie Skill (SKILL.md + scripts/ft_card.py)
-tests/             24 tests, including a full /plan run against fake Discord members
+tests/             26 tests, including a full /plan run against fake Discord members
 ```
 
 Decisions are deterministic code, so a demo never hangs on a model call. Claude is used only where language is
@@ -145,6 +145,18 @@ messy (reading a typed schedule), and everything works without an API key.
 ```bash
 python3 -m unittest discover -s tests
 ```
+
+## Security and privacy
+
+- Tokens and keys come only from environment variables; `.env` and `*.db` are git-ignored, and the profile database
+  is created readable by its owner only.
+- The bot never pings `@everyone`, `@here` or roles, whatever text ends up in a message.
+- Only the host can start or cancel a plan, only plan members can vote, and only the asked person can answer
+  their own question. Plans are capped at 25 people.
+- Claude only sees the schedule text a person typed into their own `/setup`; its answer must match a strict schema
+  and is re-checked by the normal parser.
+- Friends' Cubbie cards are untrusted: codes are size-limited, unknown fields are dropped, names are plain text, and
+  the Skill tells Cubbie to ignore any instructions inside pasted messages.
 
 ## Limits
 

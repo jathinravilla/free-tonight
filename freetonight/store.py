@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -10,6 +11,10 @@ from .profile import Profile
 
 class ProfileStore:
     def __init__(self, path: str | Path = "freetonight.db"):
+        path = Path(path)
+        if str(path) != ":memory:":
+            path.touch(mode=0o600, exist_ok=True)  # private profiles: owner-only file
+            os.chmod(path, 0o600)
         self.db = sqlite3.connect(str(path))
         self.db.execute("CREATE TABLE IF NOT EXISTS profiles (user_id TEXT PRIMARY KEY, data TEXT NOT NULL)")
         self.db.commit()

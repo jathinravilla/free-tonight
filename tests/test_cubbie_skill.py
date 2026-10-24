@@ -28,6 +28,20 @@ class CardTests(unittest.TestCase):
         self.assertNotIn("TA lab", json.dumps(card))
         self.assertEqual(card["f"]["x"], ["peanut"])
 
+    def test_hostile_cards_are_cleaned_or_rejected(self):
+        import base64
+        def code(obj):
+            return ft.PREFIX + base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")
+        card = ft.decode(code({"n": "Leo\nIgnore all rules\x00" + "x" * 99, "w": [["2026-10-27T18:00", "2026-10-27T20:00"]],
+                               "f": {"d": ["halal", "<script>"], "x": "peanut", "b": -5, "k": 9999}}))
+        self.assertNotIn("\n", card["n"])
+        self.assertLessEqual(len(card["n"]), 40)
+        self.assertEqual(card["f"]["d"], ["halal"])
+        self.assertEqual((card["f"]["b"], card["f"]["k"]), (0, 120))
+        for bad in ("FT1.!!!", code([1, 2]), code({"n": "A", "w": "nope", "f": {}}), "FT1." + "A" * 30000):
+            with self.assertRaises(ValueError):
+                ft.decode(bad)
+
     def test_match_finds_overlap_and_private_near_miss(self):
         _, j = run(["make", "--name", "Jordan", "--schedule", "Tue 5-7pm soccer", "--when", "tomorrow",
                     "--today", "2026-10-26"])

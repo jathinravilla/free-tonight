@@ -38,6 +38,7 @@ GRAY = discord.Colour.from_rgb(107, 104, 98)
 OWNER_TIMEOUT = int(os.environ.get("FREETONIGHT_ANSWER_TIMEOUT", "600"))
 POLL_SECONDS = int(os.environ.get("FREETONIGHT_POLL_SECONDS", "180"))
 JOIN_SECONDS = 30 * 60
+MAX_MEMBERS = 25  # each member gets DMs, so cap how many one plan can reach
 
 WHEN_CHOICES = [
     app_commands.Choice(name="tonight", value="today"),
@@ -89,8 +90,11 @@ class SetupModal(discord.ui.Modal, title="Your private agent"):
             self.extras.default = f"{existing.max_walk_min}, {existing.earliest}-{existing.latest}"
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        # Reading a messy schedule can call Claude, which takes longer than Discord's 3-second reply window.
+        await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            commitments, how = parse_schedule_smart(self.schedule.value) if self.schedule.value.strip() else ([], "")
+            commitments, how = (await asyncio.to_thread(parse_schedule_smart, self.schedule.value)
+                                if self.schedule.value.strip() else ([], ""))
             profile = Profile(name=interaction.user.display_name, commitments=commitments,
                               budget=parse_money(self.budget.value), diet=parse_diet(self.diet.value),
                               allergies=parse_allergies(self.allergies.value), user_id=str(interaction.user.id))
@@ -105,15 +109,14 @@ class SetupModal(discord.ui.Modal, title="Your private agent"):
                     a, _, b = hours.strip().partition("-")
                     profile.earliest, profile.latest = clock_ok(a), clock_ok(b)
         except ValueError as exc:
-            await interaction.response.send_message(
-                f"⚠️ {exc}\nNothing was saved.", ephemeral=True,
-                view=RetrySetupView(self.bot, self))
+            await interaction.followup.send(f"⚠️ {exc}\nNothing was saved.", ephemeral=True,
+                                            view=RetrySetupView(self.bot, self))
             return
         self.bot.store.put(profile)
         embed = profile_embed(profile, "🔒 Saved privately")
         if how == "claude":
             embed.set_footer(text="Claude read your schedule. Check it looks right.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         if self.after:
             await self.after(interaction, profile)
 
@@ -332,8 +335,15 @@ class JoinView(discord.ui.View):
         if self.run.started:
             await interaction.response.send_message("Planning already started.", ephemeral=True)
             return
+        if interaction.user.id not in self.run.members and len(self.run.members) >= MAX_MEMBERS:
+            await interaction.response.send_message(f"This plan is full ({MAX_MEMBERS} people).", ephemeral=True)
+            return
         if not self.run.bot.store.get(str(interaction.user.id)):
             async def after(i: discord.Interaction, profile: Profile):
+                if self.run.started or len(self.run.members) >= MAX_MEMBERS:
+                    await i.followup.send("Saved, but this plan is closed now. Start a new one with /plan.",
+                                          ephemeral=True)
+                    return
                 self.run.members[i.user.id] = i.user
                 await self.run.refresh()
             await interaction.response.send_modal(SetupModal(self.run.bot, after=after))
@@ -459,7 +469,8 @@ class LockedView(discord.ui.View):
     @discord.ui.button(label="Copy card", emoji="📋", style=discord.ButtonStyle.secondary)
     async def copy(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.send_message(
-            "Paste this into iMessage, GroupMe or WhatsApp:\n```\n" + cards.copy_card(self.result) + "\n```",
+            "Paste this into iMessage, GroupMe or WhatsApp:\n```\n" + cards.copy_card(self.result).replace("`", "'")
+            + "\n```",
             ephemeral=True)
 
     @discord.ui.button(label="Privacy ledger", emoji="🔒", style=discord.ButtonStyle.secondary)
@@ -494,6 +505,8 @@ class SplitModal(discord.ui.Modal, title="Split the bill"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         try:
             tip = parse_money(self.tip.value) if self.tip.value.strip() else 0.0
+            if tip > 100:
+                raise ValueError("Tip should be a percent from 0 to 100.")
             if self.items.value.strip():
                 items = {}
                 for line in self.items.value.strip().splitlines():
@@ -505,6 +518,8 @@ class SplitModal(discord.ui.Modal, title="Split the bill"):
                 shares = split_bill(items, tax=tax, tip_pct=tip)
             else:
                 names = [n.strip() for n in self.people.value.split(",") if n.strip()]
+                if len(names) > MAX_MEMBERS:
+                    raise ValueError(f"Split between at most {MAX_MEMBERS} people.")
                 shares = split_even(parse_money(self.total.value), names, tip_pct=tip)
         except ValueError as exc:
             await interaction.response.send_message(f"⚠️ {exc}", ephemeral=True)
@@ -519,7 +534,8 @@ class SplitModal(discord.ui.Modal, title="Split the bill"):
 
 class FreeTonightBot(commands.Bot):
     def __init__(self, db_path: str = "freetonight.db", venues_path: str | None = None):
-        super().__init__(command_prefix=commands.when_mentioned, intents=discord.Intents.default())
+        super().__init__(command_prefix=commands.when_mentioned, intents=discord.Intents.default(),
+                         allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True))
         self.store = ProfileStore(db_path)
         self.venues = load_venues(venues_path)
         self.runs: dict[int, PlanRun] = {}

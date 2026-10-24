@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import json
 import sys
 from datetime import date, datetime, time, timedelta
@@ -20,10 +21,13 @@ sys.path.insert(0, str(ROOT))
 
 from freetonight.agent import budget_bucket  # noqa: E402
 from freetonight.negotiation import ACTIVITIES  # noqa: E402
-from freetonight.profile import parse_allergies, parse_diet, parse_schedule, upcoming_dates  # noqa: E402
+from freetonight.profile import ALLERGENS, DIET_TAGS, parse_allergies, parse_diet, parse_schedule, upcoming_dates  # noqa: E402,E501
 from freetonight.timeutil import at, contains, fmt_slot, subtract  # noqa: E402
 
 PREFIX = "FT1."
+MAX_CARDS = 25
+MAX_WINDOWS = 200
+MAX_CODE_LEN = 20000
 
 
 def load_events(path: str | None, schedule: str | None, dates: list[date]) -> list[dict]:
@@ -58,8 +62,36 @@ def decode(token: str) -> dict:
     token = token.strip()
     if not token.startswith(PREFIX):
         raise ValueError("Not a Free Tonight card code (it starts with FT1.)")
+    if len(token) > MAX_CODE_LEN:
+        raise ValueError("Card code is too long")
     body = token[len(PREFIX):]
-    return json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+    try:
+        raw = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+    except (binascii.Error, UnicodeDecodeError) as exc:
+        raise ValueError("Card code is damaged; ask for the whole message again") from exc
+    return clean_card(raw)
+
+
+def _as_list(v) -> list:
+    return v[:20] if isinstance(v, list) else [v] if isinstance(v, str) else []
+
+
+def clean_card(raw) -> dict:
+    """Cards come from other people: keep only well-formed fields, and treat the name as plain text."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("w"), list) or not isinstance(raw.get("f"), dict):
+        raise ValueError("Card code is damaged; ask for the whole message again")
+    name = "".join(ch for ch in str(raw.get("n", "Friend")) if ch.isprintable())[:40].strip() or "Friend"
+    windows = []
+    for w in raw["w"][:MAX_WINDOWS]:
+        s, e = datetime.fromisoformat(str(w[0])), datetime.fromisoformat(str(w[1]))
+        if e > s:
+            windows.append([s.isoformat(timespec="minutes"), e.isoformat(timespec="minutes")])
+    f = raw["f"]
+    return {"v": 1, "n": name, "a": str(raw.get("a", "")),
+            "w": windows,
+            "f": {"d": sorted({str(d) for d in _as_list(f.get("d"))} & set(DIET_TAGS)),
+                  "x": sorted({str(x) for x in _as_list(f.get("x"))} & set(ALLERGENS)),
+                  "b": max(0, int(f.get("b", 20))), "k": max(1, min(120, int(f.get("k", 20))))}}
 
 
 def find_codes(text: str) -> list[str]:
@@ -93,7 +125,10 @@ def cmd_match(a) -> int:
     if not codes:
         print("No FT1. card codes found. Ask friends to paste their whole card message.", file=sys.stderr)
         return 2
-    cards = [decode(c) for c in codes]
+    cards = [decode(c) for c in codes[:MAX_CARDS]]
+    if not any(c["w"] for c in cards):
+        print("The pasted cards have no free times in them.", file=sys.stderr)
+        return 3
     dates_all = sorted({datetime.fromisoformat(w[0]).date() for c in cards for w in c["w"]})
     events = load_events(a.events, a.schedule, dates_all)
     mine = free_windows(events, dates_all, a.earliest, a.latest)
@@ -176,7 +211,7 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     try:
         return cmd_make(a) if a.cmd == "make" else cmd_match(a)
-    except (ValueError, KeyError, json.JSONDecodeError) as exc:
+    except (ValueError, KeyError, TypeError, IndexError, json.JSONDecodeError) as exc:
         print(f"Bad input: {exc}", file=sys.stderr)
         return 2
 
