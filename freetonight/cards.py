@@ -21,7 +21,12 @@ def copy_card(r: PlanResult) -> str:
     if p.venue:
         lines.append(f"📍 {p.venue.name}" + (f" ({p.venue.area})" if p.venue.area else ""))
         lines.append(f"💸 about ${p.venue.price_pp:.0f} each" if p.venue.price_pp else "💸 free")
-    lines.append(f"🙋 {', '.join(r.confirmed)}" + (f" · maybe: {', '.join(r.maybe)}" if r.maybe else ""))
+    else:
+        lines.append("📍 place TBD, pick one in chat")
+    who = [", ".join(r.confirmed)] if r.confirmed else []
+    if r.maybe:
+        who.append("maybe: " + ", ".join(r.maybe))
+    lines.append("🙋 " + " · ".join(who))
     lines.append("Reply 'in' to join. Planned with Free Tonight")
     return "\n".join(lines)
 

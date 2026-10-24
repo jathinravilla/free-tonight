@@ -9,7 +9,7 @@ from typing import Awaitable, Callable
 from .ledger import Ledger
 from .profile import Commitment, Profile
 from .timeutil import Interval, fmt_clock, fmt_slot, overlaps, subtract
-from .venues import Venue
+from .venues import FOOD_KINDS, Venue
 
 # The agent asks its own human through this. It gets a question and the allowed answers, returns one answer.
 AskOwner = Callable[["OwnerQuestion"], Awaitable[str]]
@@ -34,8 +34,8 @@ class Plan:
 
     @property
     def label(self) -> str:
-        where = self.venue.name if self.venue else "TBD"
-        return f"{self.kind.title()} at {where}, {fmt_slot(self.start, self.end)}"
+        where = f" at {self.venue.name}" if self.venue else ""
+        return f"{self.kind.title()}{where}, {fmt_slot(self.start, self.end)}"
 
 
 def budget_bucket(amount: float) -> int:
@@ -107,7 +107,7 @@ class PersonalAgent:
                 return "decline", "budget"
             if v.walk_min > p.max_walk_min:
                 return "decline", "distance"
-            if any(d not in v.diet for d in p.diet) or any(a not in v.allergy_safe for a in p.allergies):
+            if plan.kind in FOOD_KINDS and (any(d not in v.diet for d in p.diet) or any(a not in v.allergy_safe for a in p.allergies)):
                 return "decline", "food"
         return "accept", ""
 

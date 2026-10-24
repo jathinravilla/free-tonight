@@ -9,6 +9,9 @@ from pathlib import Path
 
 from .timeutil import DAYS
 
+# Diet and allergy filters only matter where people eat or drink.
+FOOD_KINDS = {"dinner", "lunch", "coffee"}
+
 
 @dataclass
 class Venue:
@@ -47,15 +50,15 @@ class GroupFilters:
     budget_cap: float = 999.0
     max_walk_min: int = 999
 
-    def rejects(self, v: Venue) -> list[str]:
+    def rejects(self, v: Venue, *, food: bool = True) -> list[str]:
         why = []
         if v.price_pp > self.budget_cap:
             why.append("budget")
         if v.walk_min > self.max_walk_min:
             why.append("distance")
-        if any(d not in v.diet for d in self.diet):
+        if food and any(d not in v.diet for d in self.diet):
             why.append("diet")
-        if any(a not in v.allergy_safe for a in self.allergy_safe):
+        if food and any(a not in v.allergy_safe for a in self.allergy_safe):
             why.append("allergy")
         return why
 
@@ -78,7 +81,7 @@ def rank(venues: list[Venue], kind: str, filters: GroupFilters, start: datetime,
     for v in venues:
         if kind not in v.kinds or not v.open_during(start, end):
             continue
-        broken = [r for r in filters.rejects(v) if r not in ignore]
+        broken = [r for r in filters.rejects(v, food=kind in FOOD_KINDS) if r not in ignore]
         out.append((v, broken))
     # Fewest broken filters, then well rated, then cheap and close.
     out.sort(key=lambda p: (len(p[1]), -p[0].rating * 4 + p[0].price_pp * 0.25 + p[0].walk_min * 0.15))

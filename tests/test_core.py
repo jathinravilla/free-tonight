@@ -141,6 +141,20 @@ class NegotiationTests(unittest.TestCase):
         r = asyncio.run(PlanSession(agents, "A", "dinner", [now.date()], load_venues(), now=now).run())
         self.assertEqual(r.status, "no_overlap")
 
+    def test_food_needs_dont_block_non_food_plans(self):
+        # Seen live: a games night with halal/vegetarian/peanut needs found no place and said "at TBD".
+        make = scripted({"confirm": {"A": "maybe", "B": "maybe"}})
+        agents = [PersonalAgent(Profile(name="A", diet=["halal"], allergies=["peanut"]), make("A")),
+                  PersonalAgent(Profile(name="B", diet=["vegetarian"]), make("B"))]
+        now = datetime(2026, 10, 24, 15)
+        r = asyncio.run(PlanSession(agents, "A", "games", [date(2026, 10, 25)], load_venues(), now=now).run())
+        self.assertEqual(r.plan.venue.name, "Union Game Room")
+        self.assertEqual(r.filters.diet, [])
+        shared = json.dumps([e.shared for e in r.ledger.entries])
+        self.assertNotIn("halal", shared)
+        self.assertNotIn("TBD", r.plan.label)
+        self.assertIn("maybe: A, B", cards.copy_card(r))
+
     def test_budget_bucket(self):
         self.assertEqual(budget_bucket(12), 10)
         self.assertEqual(budget_bucket(15), 15)

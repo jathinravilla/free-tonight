@@ -12,7 +12,7 @@ from typing import Awaitable, Callable
 from .agent import PersonalAgent, Plan
 from .ledger import Ledger
 from .timeutil import Interval, at, contains, fmt_clock, fmt_slot
-from .venues import GroupFilters, Venue, rank
+from .venues import FOOD_KINDS, GroupFilters, Venue, rank
 
 
 @dataclass(frozen=True)
@@ -93,24 +93,26 @@ class PlanSession:
 
     def _gather_filters(self) -> GroupFilters:
         merged = GroupFilters()
+        food = self.activity.name in FOOD_KINDS
         diet: set[str] = set()
         allergy: set[str] = set()
         for a in self.agents:
             f = a.private_filters()
-            diet.update(f["diet"])
-            allergy.update(f["allergy_safe"])
+            if food:  # diet and allergies stay inside each agent unless the plan involves food
+                diet.update(f["diet"])
+                allergy.update(f["allergy_safe"])
             merged.budget_cap = min(merged.budget_cap, f["budget_cap"])
             merged.max_walk_min = min(merged.max_walk_min, f["max_walk_min"])
         merged.diet, merged.allergy_safe = sorted(diet), sorted(allergy)
         self.ledger.add(
             "2 · Filters", "all agents", "table", "filters",
             f"Agents pooled their filters anonymously ({len(self.agents)} agents)",
-            shared={"needs_options_for": merged.diet or ["nothing special"],
-                    "must_avoid": merged.allergy_safe or ["nothing"],
+            shared={**({"needs_options_for": merged.diet or ["nothing special"],
+                       "must_avoid": merged.allergy_safe or ["nothing"]} if food else {}),
                     "price_cap_per_person": f"${merged.budget_cap:.0f}",
                     "max_walk": f"{merged.max_walk_min} min"},
             withheld=["whose filter is whose", "exact budgets (only $5 steps leave each agent)",
-                      "why anyone has a filter"],
+                      "why anyone has a filter"] + ([] if food else ["diet and allergies (no food at this plan)"]),
         )
         return merged
 

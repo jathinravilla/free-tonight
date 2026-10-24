@@ -26,7 +26,7 @@ from .profile import Profile, clock_ok, parse_allergies, parse_diet, parse_money
 from .split import format_split, split_bill, split_even
 from .store import ProfileStore
 from .timeutil import fmt_clock
-from .venues import load_venues
+from .venues import FOOD_KINDS, load_venues
 
 log = logging.getLogger("freetonight")
 
@@ -98,6 +98,9 @@ class SetupModal(discord.ui.Modal, title="Your private agent"):
                 walk, _, hours = self.extras.value.partition(",")
                 if walk.strip():
                     profile.max_walk_min = int(parse_money(walk))
+                    if not 1 <= profile.max_walk_min <= 60:
+                        raise ValueError(f"Walk limit should be 1 to 60 minutes, not {profile.max_walk_min}. "
+                                         "Write it first, like `15, 11am-11:30pm`.")
                 if hours.strip():
                     a, _, b = hours.strip().partition("-")
                     profile.earliest, profile.latest = clock_ok(a), clock_ok(b)
@@ -299,7 +302,10 @@ class PlanRun:
             await self.channel.send(
                 " ".join(m.mention for uid, m in self.members.items()
                          if m.display_name in self.result.confirmed + self.result.maybe)
-                + f" you're set: **{self.result.plan.label}**. Calendar invite and bill split are on the card.")
+                + (f" you're set: **{self.result.plan.label}**." if self.result.confirmed
+                   else f" penciled in: **{self.result.plan.label}**. Nobody's a firm yes yet.")
+                + (" Calendar invite and bill split are on the card." if self.result.plan.venue
+                   else " Pick a spot in chat; the calendar invite is on the card."))
 
     async def poll(self, options: list[str]) -> int:
         view = PollView(self, options)
@@ -412,9 +418,15 @@ class PollView(discord.ui.View):
 def locked_embed(r: PlanResult) -> discord.Embed:
     p = r.plan
     a = ACTIVITIES[p.kind]
-    e = discord.Embed(title=f"{a.emoji} {p.kind.title()} is on", colour=GREEN,
-                      description=f"**{cards.when_line(p.start, p.end)}**")
-    if p.venue:
+    firm = bool(r.confirmed)
+    title = f"{a.emoji} {p.kind.title()} is on" if firm else f"{a.emoji} {p.kind.title()} is penciled in"
+    desc = f"**{cards.when_line(p.start, p.end)}**"
+    if not firm:
+        desc += "\nEveryone said maybe. It's on the card so nobody forgets; tap 📅 if you're going."
+    e = discord.Embed(title=title, colour=GREEN if firm else ORANGE, description=desc)
+    if not p.venue:
+        e.add_field(name="Where", value="No listed place fits everyone then, so pick a spot in chat.", inline=False)
+    else:
         e.add_field(name="Where", value=f"{p.venue.name}" + (f" · {p.venue.area}" if p.venue.area else "")
                     + f"\n{p.venue.walk_min} min walk", inline=True)
         e.add_field(name="Cost", value=f"about ${p.venue.price_pp:.0f} each" if p.venue.price_pp else "free",
@@ -425,7 +437,7 @@ def locked_embed(r: PlanResult) -> discord.Embed:
         e.add_field(name="Maybe", value=", ".join(r.maybe), inline=True)
     if r.declined:
         e.add_field(name="Can't", value=", ".join(r.declined), inline=True)
-    if r.filters and (r.filters.diet or r.filters.allergy_safe):
+    if p.kind in FOOD_KINDS and r.filters and (r.filters.diet or r.filters.allergy_safe):
         bits = [f"{d} options" for d in r.filters.diet] + [f"{x}-safe" for x in r.filters.allergy_safe]
         e.add_field(name="Respected for the group", value=", ".join(bits), inline=False)
     s = r.ledger.stats()
@@ -498,7 +510,8 @@ class SplitModal(discord.ui.Modal, title="Split the bill"):
             await interaction.response.send_message(f"⚠️ {exc}", ephemeral=True)
             return
         e = discord.Embed(title="💸 Who owes what", description=f"```\n{format_split(shares)}\n```", colour=GREEN)
-        e.set_footer(text="Tax split by what each person ordered; tip on each subtotal; cents add up exactly.")
+        e.set_footer(text="Tax split by what each person ordered; tip on each subtotal; cents add up exactly."
+                     if self.items.value.strip() else "Split evenly; cents add up exactly.")
         await interaction.response.send_message(embed=e)
 
 
