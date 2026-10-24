@@ -237,11 +237,11 @@ class PlanSession:
         await self.progress("placing", "Matching places to everyone's filters")
         options: list[tuple[Candidate, Venue | None, list[str]]] = []
         best_count = len(cands[0].attendees)
-        seen_days: set[tuple[date, int]] = set()
-        for c in cands[:40]:
+        seen_days: set[date] = set()  # one option per day, so a vote is between real alternatives
+        for c in cands:
             if len(c.attendees) < best_count:
                 break
-            key = (c.start.date(), c.start.hour // 2)
+            key = c.start.date()
             if key in seen_days:
                 continue
             seen_days.add(key)

@@ -138,7 +138,10 @@ def profile_embed(p: Profile, title: str) -> discord.Embed:
     e = discord.Embed(title=title, colour=PURPLE,
                       description="Only you can see this. Your agent shares free/busy times, pooled filters "
                                   "and yes/no answers, never these details.")
-    e.add_field(name="Schedule", value="\n".join(c.describe() for c in p.commitments) or "Nothing yet", inline=False)
+    sched = "\n".join(c.describe() for c in p.commitments) or "Nothing yet"
+    if len(sched) > 1000:  # Discord rejects fields over 1024 characters
+        sched = sched[:990].rsplit("\n", 1)[0] + "\n…and more"
+    e.add_field(name="Schedule", value=sched, inline=False)
     e.add_field(name="Budget", value=f"up to ${p.budget:.0f}")
     e.add_field(name="Walk", value=f"up to {p.max_walk_min} min")
     e.add_field(name="Food", value=", ".join(p.diet + [f"no {a}" for a in p.allergies]) or "anything")
@@ -222,6 +225,8 @@ class PlanRun:
         self.detail = ""
         self.result: PlanResult | None = None
         self.started = False
+        self.task: asyncio.Task | None = None
+        self.created = datetime.now()
 
     @property
     def act(self):
@@ -272,6 +277,12 @@ class PlanRun:
     async def progress(self, stage: str, detail: str) -> None:
         self.stage, self.detail = stage, detail
         await self.refresh()
+        if stage == "confirming":  # people miss DMs; one nudge in the channel
+            try:
+                await self.channel.send(" ".join(m.mention for m in self.members.values())
+                                        + " 📬 Check your DMs from Free Tonight to lock this in.")
+            except discord.HTTPException:
+                pass
 
     async def start(self) -> None:
         self.started = True
@@ -330,6 +341,19 @@ class JoinView(discord.ui.View):
         super().__init__(timeout=JOIN_SECONDS)
         self.run = run
 
+    async def on_timeout(self) -> None:
+        # Nobody pressed Start: free the channel so /plan works again.
+        run = self.run
+        if run.started or run.bot.runs.get(getattr(run.channel, "id", 0)) is not run:
+            return
+        run.bot.runs.pop(getattr(run.channel, "id", 0), None)
+        if run.message:
+            try:
+                await run.message.edit(content="This plan expired before anyone pressed Start. Run /plan again.",
+                                       embed=None, view=None)
+            except discord.HTTPException:
+                pass
+
     @discord.ui.button(label="I'm in", style=discord.ButtonStyle.success, emoji="🙋")
     async def join(self, interaction: discord.Interaction, _: discord.ui.Button):
         if self.run.started:
@@ -372,7 +396,7 @@ class JoinView(discord.ui.View):
             return
         await interaction.response.defer()
         self.stop()
-        asyncio.create_task(self.run.start())
+        self.run.task = asyncio.create_task(self.run.start())
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
     async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -598,8 +622,19 @@ def register_commands(bot: FreeTonightBot) -> None:
     @app_commands.choices(activity=ACTIVITY_CHOICES, when=WHEN_CHOICES)
     async def plan_cmd(interaction: discord.Interaction, activity: app_commands.Choice[str],
                        when: app_commands.Choice[str], minutes: app_commands.Range[int, 30, 300] | None = None):
-        if interaction.channel_id in bot.runs:
-            await interaction.response.send_message("There's already a plan going in this channel.", ephemeral=True)
+        old = bot.runs.get(interaction.channel_id)
+        if old and not old.started and (old.host.id == interaction.user.id
+                                        or (datetime.now() - old.created).total_seconds() > JOIN_SECONDS):
+            bot.runs.pop(interaction.channel_id, None)
+            if old.message:
+                try:
+                    await old.message.edit(content="Replaced by a newer plan below.", embed=None, view=None)
+                except discord.HTTPException:
+                    pass
+        elif old:
+            await interaction.response.send_message(
+                f"{old.host.display_name}'s plan is still going in this channel. Join that one, or wait for it "
+                "to finish.", ephemeral=True)
             return
         run = PlanRun(bot, interaction.channel, interaction.user, activity.value, when.value, minutes)
         if not bot.store.get(str(interaction.user.id)):

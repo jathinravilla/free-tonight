@@ -136,7 +136,7 @@ freetonight/
   discord_bot.py   Slash commands, pop-ups, DM questions, live plan card, poll, buttons
   store.py         SQLite, one row per person
 cubbie-skill/      The Cubbie Skill (SKILL.md + scripts/ft_card.py)
-tests/             26 tests, including a full /plan run against fake Discord members
+tests/             27 tests, including a full /plan run against fake Discord members
 ```
 
 Decisions are deterministic code, so a demo never hangs on a model call. Claude is used only where language is
