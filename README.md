@@ -155,4 +155,4 @@ python3 -m unittest discover -s tests
 
 ---
 
-Made by Jathin, Samriddhi and team for the Cubbie Hackathon, October 2026.
+Made by Jathin, and team for the Cubbie Hackathon, October 2026.
