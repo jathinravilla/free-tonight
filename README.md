@@ -19,10 +19,10 @@ Built for the [Cubbie Hackathon](https://hackathon.cubbie.ai), Track 3 (Group Ch
 | Track 3 asks | Free Tonight |
 | --- | --- |
 | An AI that joins a group chat and makes it more useful | Add the bot to a Discord server; `/plan dinner weeknights` turns "anyone free?" into one locked plan card, updated live in the channel |
-| Something students would actually invite into their group | Two taps each (I'm in, then yes/maybe/no), a one-tap tie poll, a calendar invite, a copy card for iMessage or GroupMe, and a bill split to the cent |
+| Something students would actually invite into their group | One tap each (I'm in); the bot posts the verdict the moment agents finish (works out or not, who's going, who's busy), a one-tap poll only when days tie, a calendar invite, a copy card for iMessage or GroupMe, and a bill split to the cent |
 | Tied to real campus life | Plans around class schedules, TA hours and shifts, plus campus budgets, dietary needs, allergies and walking distance |
 | Working prototype on a real scenario | Live Discord bot, a no-account terminal demo, and tests that run a full `/plan` against fake Discord members |
-| Multi-agent: conflicting constraints, what they share, when they confirm | Each friend gets a private agent. When nobody fits, agents ask their owner in a DM about *flexible* commitments ("leave study group 30 min early?"); budget, diet, allergy and distance clashes knock places out without saying whose they were. Only free windows, pooled filters (budget rounded down to $5) and yes/no answers are shared, shown line by line in the **privacy ledger**. Agents ask before trimming anything and before locking the plan |
+| Multi-agent: conflicting constraints, what they share, when they confirm | Each friend gets a private agent. When nobody fits, agents ask their owner in a DM about *flexible* commitments ("leave study group 30 min early?"); budget, diet, allergy and distance clashes knock places out without saying whose they were. Only free windows, pooled filters (budget rounded down to $5) and yes/no answers are shared, shown line by line in the **privacy ledger**. Agents ask only before trimming a flexible commitment; nobody has to double-check a time their agent already knows they're free for, and a **Can't go** button handles changes |
 
 ## How a plan happens
 
@@ -42,7 +42,7 @@ Built for the [Cubbie Hackathon](https://hackathon.cubbie.ai), Track 3 (Group Ch
 6. **Round 4, place.** Places are ranked against the pooled filters; every agent judges the proposal against
    its owner's real profile and answers accept or decline with a category (budget, distance, food).
 7. **Round 5, vote.** If two or more options tie, the group gets a one-tap poll.
-8. **Round 6, confirm.** Every agent DMs its owner: lock it in? Yes, maybe or no.
+8. **Round 6, verdict.** Each agent already knows from its owner's schedule whether they're free, so nobody double-checks. The bot posts right away: "✅ It works out! Going (9): … · Busy then (1): …" (or why it doesn't). Plans change? Tap **Can't go** on the card.
 9. **Locked.** One card in the channel, updated in place the whole time: time, place, who's going, cost per
    person, and buttons for 📅 calendar invite, 📋 copy card (paste into iMessage or GroupMe), 🔒 privacy ledger
    and 💸 bill split.

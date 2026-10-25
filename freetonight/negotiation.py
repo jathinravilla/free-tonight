@@ -68,7 +68,8 @@ async def _noop_progress(stage: str, detail: str) -> None:
 class PlanSession:
     def __init__(self, agents: list[PersonalAgent], host: str, activity: str, dates: list[date],
                  venues: list[Venue], *, minutes: int | None = None, now: datetime | None = None,
-                 progress: Progress | None = None, poll: Poll | None = None, step_minutes: int = 15):
+                 progress: Progress | None = None, poll: Poll | None = None, step_minutes: int = 15,
+                 confirm: bool = True):
         if activity not in ACTIVITIES:
             raise ValueError(f"Unknown activity {activity!r}. Try: {', '.join(ACTIVITIES)}")
         if len(agents) < 2:
@@ -84,6 +85,8 @@ class PlanSession:
         self.progress = progress or _noop_progress
         self.poll = poll
         self.step = timedelta(minutes=step_minutes)
+        # confirm=False: agents already know from each schedule who's free, so nobody is asked to double-check.
+        self.confirm = confirm
         self.ledger = Ledger()
 
     # ---- Round 1 and 2: what goes on the table ---------------------------------------
@@ -264,9 +267,16 @@ class PlanSession:
         c, venue, near = chosen
         plan = Plan(act.name, c.start, c.end, venue, list(c.attendees))
         cost = venue.price_pp if venue else 0.0
-        await self.progress("confirming", f"Waiting on {len(plan.attendees)} confirmations")
-        answers = await asyncio.gather(*[self.by_name[n].confirm(plan, cost, self.ledger, "6 · Confirm", self.host)
-                                         for n in plan.attendees])
+        if self.confirm:
+            await self.progress("confirming", f"Waiting on {len(plan.attendees)} confirmations")
+            answers = await asyncio.gather(*[self.by_name[n].confirm(plan, cost, self.ledger, "6 · Confirm",
+                                                                     self.host) for n in plan.attendees])
+        else:
+            answers = ["yes"] * len(plan.attendees)
+            for n in plan.attendees:
+                self.ledger.add("6 · Confirm", n, self.host, "confirm_answer",
+                                f"{n}'s agent: free then, so {n} is going (checked against their schedule)",
+                                shared={"answer": "yes"}, withheld=["their schedule"])
         confirmed = [n for n, a in zip(plan.attendees, answers) if a == "yes"]
         maybe = [n for n, a in zip(plan.attendees, answers) if a == "maybe"]
         declined = [n for n, a in zip(plan.attendees, answers) if a == "no"]

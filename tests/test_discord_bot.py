@@ -151,7 +151,9 @@ class DiscordBotTests(unittest.TestCase):
         self.assertIsInstance(final["view"], db.LockedView)
         stages_seen = [e["embed"].description for e in run.message.edits if e["embed"].description]
         self.assertTrue(any("⏳" in s for s in stages_seen))
-        self.assertTrue(any("you're set" in (c or "") for c, _ in channel.sent))
+        verdict = channel.sent[-1][0]
+        self.assertIn("It works out", verdict)
+        self.assertIn("Going (5)", verdict)  # nobody had to confirm; free people are going
 
     def test_real_buttons_dms_and_setup_modal(self):
         """/plan, a newcomer's setup pop-up, Start, and Yes in DMs, through the real button callbacks."""
@@ -199,7 +201,20 @@ class DiscordBotTests(unittest.TestCase):
         self.assertEqual(run.result.status, "locked")
         self.assertEqual(sorted(run.result.confirmed), ["Pause", "akshara"])
         self.assertNotIn(channel.id, run.bot.runs)  # channel is free for the next /plan
-        self.assertTrue(any("Check your DMs" in (c or "") for c, _ in channel.sent))
+        self.assertIn("It works out", channel.sent[-1][0])
+        self.assertEqual(run.result.declined, [])
+
+        # Plans change: one person taps Can't go, and the card updates; tapping again puts them back.
+        async def cant():
+            view = db.LockedView(run.bot, run.result)
+            await press(view, "Can't go", FakeMember(2, "akshara"), channel)
+            after_one = (list(run.result.confirmed), db.locked_embed(run.result).title)
+            await press(view, "Can't go", FakeMember(2, "akshara"), channel)
+            return after_one
+        (going, title) = asyncio.run(cant())
+        self.assertEqual(going, ["Pause"])
+        self.assertIn("Fell through", title)
+        self.assertEqual(sorted(run.result.confirmed), ["Pause", "akshara"])
 
     def test_typed_setup_is_forgiving(self):
         async def go():

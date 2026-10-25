@@ -58,7 +58,6 @@ STAGES = [
     ("negotiating", "Ask about flexible plans, privately"),
     ("placing", "Match places to everyone's filters"),
     ("polling", "Group vote on ties"),
-    ("confirming", "Everyone confirms in DMs"),
     ("locked", "Locked"),
 ]
 
@@ -490,12 +489,6 @@ class PlanRun:
     async def progress(self, stage: str, detail: str) -> None:
         self.stage, self.detail = stage, detail
         await self.refresh()
-        if stage == "confirming":  # people miss DMs; one nudge in the channel
-            try:
-                await self.channel.send(" ".join(m.mention for m in self.members.values())
-                                        + " 📬 Check your DMs from Free Tonight to lock this in.")
-            except discord.HTTPException:
-                pass
 
     async def start(self) -> None:
         self.started = True
@@ -517,7 +510,7 @@ class PlanRun:
             agents.append(PersonalAgent(profile, make_ask()))
         session = PlanSession(agents, self.host.display_name, self.activity,
                               dates, self.bot.venues, minutes=self.minutes,
-                              now=now, progress=self.progress, poll=self.poll)
+                              now=now, progress=self.progress, poll=self.poll, confirm=False)
         try:
             self.result = await session.run()
         except Exception:
@@ -528,14 +521,22 @@ class PlanRun:
         self.stage = "locked" if self.result.status == "locked" else "done"
         await self.refresh()
         self.bot.runs.pop(getattr(self.channel, "id", 0), None)
-        if self.result.status == "locked":
-            await self.channel.send(
-                " ".join(m.mention for uid, m in self.members.items()
-                         if m.display_name in self.result.confirmed + self.result.maybe)
-                + (f" you're set: **{self.result.plan.label}**." if self.result.confirmed
-                   else f" penciled in: **{self.result.plan.label}**. Nobody's a firm yes yet.")
-                + (" Calendar invite and bill split are on the card." if self.result.plan.venue
-                   else " Pick a spot in chat; the calendar invite is on the card."))
+        await self.channel.send(self.announcement())
+
+    def announcement(self) -> str:
+        """The verdict, posted as soon as the agents finish: does it work out, and who can make it."""
+        r = self.result
+        if r.status != "locked":
+            return ("❌ **It doesn't work out this time.** There's no time when 2 or more of you are free. "
+                    "Try `/plan` with *this week* or a shorter hangout.")
+        going = [m.mention for m in self.members.values() if m.display_name in r.confirmed]
+        lines = [f"✅ **It works out!** {r.plan.label}",
+                 f"🙋 Going ({len(going)}): " + " ".join(going)]
+        if r.unavailable:
+            lines.append(f"🚫 Busy then ({len(r.unavailable)}): " + ", ".join(r.unavailable))
+        lines.append("Your agents checked everyone's schedule, so no need to double-check. "
+                     "Plans change? Tap **Can't go** on the card.")
+        return "\n".join(lines)
 
     async def _read_calendars(self, profiles: dict, dates) -> None:
         """Add fresh busy times from linked calendars (this plan only; nothing is saved)."""
@@ -684,12 +685,16 @@ class PollView(discord.ui.View):
 def locked_embed(r: PlanResult) -> discord.Embed:
     p = r.plan
     a = ACTIVITIES[p.kind]
-    firm = bool(r.confirmed)
-    title = f"{a.emoji} {p.kind.title()} is on" if firm else f"{a.emoji} {p.kind.title()} is penciled in"
     desc = f"**{cards.when_line(p.start, p.end)}**"
-    if not firm:
+    if len(r.confirmed) + len(r.maybe) < 2:
+        title, colour = f"{a.emoji} Fell through", GRAY
+        desc += "\nFewer than 2 people can go now. Start a new /plan to try another time."
+    elif r.confirmed:
+        title, colour = f"{a.emoji} {p.kind.title()} is on", GREEN
+    else:
+        title, colour = f"{a.emoji} {p.kind.title()} is penciled in", ORANGE
         desc += "\nEveryone said maybe. It's on the card so nobody forgets; tap 📅 if you're going."
-    e = discord.Embed(title=title, colour=GREEN if firm else ORANGE, description=desc)
+    e = discord.Embed(title=title, colour=colour, description=desc)
     if not p.venue:
         e.add_field(name="Where", value="No listed place fits everyone then, so pick a spot in chat.", inline=False)
     else:
@@ -702,7 +707,9 @@ def locked_embed(r: PlanResult) -> discord.Embed:
     if r.maybe:
         e.add_field(name="Maybe", value=", ".join(r.maybe), inline=True)
     if r.declined:
-        e.add_field(name="Can't", value=", ".join(r.declined), inline=True)
+        e.add_field(name="Can't go", value=", ".join(r.declined), inline=True)
+    if r.unavailable:
+        e.add_field(name="Busy then", value=", ".join(r.unavailable), inline=True)
     if p.kind in FOOD_KINDS and r.filters and (r.filters.diet or r.filters.allergy_safe):
         bits = [f"{d} options" for d in r.filters.diet] + [f"{x}-safe" for x in r.filters.allergy_safe]
         e.add_field(name="Respected for the group", value=", ".join(bits), inline=False)
@@ -742,6 +749,29 @@ class LockedView(discord.ui.View):
     @discord.ui.button(label="Split the bill", emoji="💸", style=discord.ButtonStyle.success)
     async def split(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.send_modal(SplitModal(self.result.confirmed + self.result.maybe))
+
+    @discord.ui.button(label="Can't go", emoji="✋", style=discord.ButtonStyle.danger, row=1)
+    async def cant(self, interaction: discord.Interaction, _: discord.ui.Button):
+        r, name = self.result, interaction.user.display_name
+        if name in r.confirmed or name in r.maybe:
+            r.confirmed = [n for n in r.confirmed if n != name]
+            r.maybe = [n for n in r.maybe if n != name]
+            r.declined.append(name)
+            note = "Got it, you're marked as can't go. Tap again if you can make it after all."
+        elif name in r.declined:
+            r.declined.remove(name)
+            r.confirmed.append(name)
+            note = "You're back in."
+        else:
+            await interaction.response.send_message("You weren't part of this plan.", ephemeral=True)
+            return
+        r.ledger.add("7 · Changes", name, "table", "update", f"{name} {'dropped out' if name in r.declined else 'is back in'}",
+                     shared={"answer": "no" if name in r.declined else "yes"}, human=True)
+        await interaction.response.edit_message(embed=locked_embed(r), view=self)
+        await interaction.followup.send(note, ephemeral=True)
+        if len(r.confirmed) + len(r.maybe) < 2 and name in r.declined:
+            await interaction.followup.send(f"Heads up: with {name} out, fewer than 2 people are going. "
+                                            "Start a new `/plan` if you still want to hang out.")
 
 
 class SplitModal(discord.ui.Modal, title="Split the bill"):
