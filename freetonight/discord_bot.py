@@ -23,7 +23,7 @@ from . import calendar_feed, cards, ledger_html
 from .agent import OwnerQuestion, PersonalAgent
 from .llm import parse_schedule_smart
 from .negotiation import ACTIVITIES, PlanResult, PlanSession
-from .profile import (ALLERGENS, BLOCKS, DIET_TAGS, Profile, busy_from_free, clock_ok, parse_allergies,
+from .profile import (BLOCKS, Profile, busy_from_free, clock_ok, parse_allergies,
                       parse_diet, parse_money, upcoming_dates)
 from .timeutil import DAYS
 from .split import format_split, split_bill, split_even
@@ -65,11 +65,16 @@ STAGES = [
 
 # ---------------------------------------------------------------- profile setup
 
-WEEKDAY_SLOTS = [f"{d} {b}" for d in DAYS[:5] for b in BLOCKS]
-WEEKEND_SLOTS = [f"{d} {b}" for d in DAYS[5:] for b in BLOCKS]
-FOOD_OPTIONS = ([(f"diet:{d}", d.capitalize(), "I need options for this") for d in sorted(DIET_TAGS)]
-                + [(f"no:{a}", f"No {a}", "Allergic or can't eat it") for a in sorted(ALLERGENS)])
-BUDGETS = [10, 15, 20, 30, 50, 100]
+DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+# One choice per real-life need; each maps onto the diet tags and allergens venues are matched against.
+FOOD_OPTIONS = [
+    ("Vegetarian", {"diet": ["vegetarian"]}), ("Vegan", {"diet": ["vegan"]}),
+    ("Halal", {"diet": ["halal"]}), ("Kosher", {"diet": ["kosher"]}),
+    ("No nuts", {"allergies": ["peanut", "tree-nut"]}), ("No seafood", {"allergies": ["shellfish", "fish"]}),
+    ("No gluten", {"allergies": ["gluten"]}), ("No dairy", {"allergies": ["dairy"]}),
+    ("No eggs", {"allergies": ["egg"]}), ("No soy or sesame", {"allergies": ["soy", "sesame"]}),
+]
+BUDGETS = [10, 20, 30, 50]
 
 
 def _loose(text: str, parse) -> tuple[list[str], list[str]]:
@@ -91,21 +96,33 @@ class SetupPanel(discord.ui.View):
     def __init__(self, bot: "FreeTonightBot", existing: Profile | None = None, after=None):
         super().__init__(timeout=900)
         self.bot, self.existing, self.after = bot, existing, after
-        self.free = list(existing.free_blocks) if existing else []
-        self.food = ([f"diet:{d}" for d in existing.diet] + [f"no:{a}" for a in existing.allergies]) if existing else []
+        blocks = list(existing.free_blocks) if existing else []
+        self.days = sorted({DAYS.index(b.split(" ", 1)[0]) for b in blocks})
+        self.times = [t for t in BLOCKS if any(b.endswith(" " + t) for b in blocks)]
+        have = set(existing.diet + existing.allergies) if existing else set()
+        self.food = [label for label, m in FOOD_OPTIONS
+                     if have and set(m.get("diet", []) + m.get("allergies", [])) <= have]
         self.budget = existing.budget if existing else 20.0
         self.calendar_url = existing.calendar_url if existing else ""
-        self._select(WEEKDAY_SLOTS, "When are you usually free on weekdays?", "free_wd", 0)
-        self._select(WEEKEND_SLOTS, "When are you usually free on weekends?", "free_we", 1)
-        food = discord.ui.Select(placeholder="Food: anything you need or can't eat (optional)", min_values=0,
+
+        days = discord.ui.Select(placeholder="1. Which days are you usually free?", min_values=0, max_values=7,
+                                 row=0, options=[discord.SelectOption(label=n, value=str(i), default=i in self.days)
+                                                 for i, n in enumerate(DAY_NAMES)])
+        days.callback = self._on_days
+        times = discord.ui.Select(placeholder="2. What times on those days?", min_values=0, max_values=len(BLOCKS),
+                                  row=1, options=[discord.SelectOption(label=t.capitalize(), value=t,
+                                                                       description=_block_hours("x " + t),
+                                                                       default=t in self.times) for t in BLOCKS])
+        times.callback = self._on_times
+        food = discord.ui.Select(placeholder="3. Food: anything you need or can't eat (optional)", min_values=0,
                                  max_values=len(FOOD_OPTIONS), row=2, options=[
-                                     discord.SelectOption(label=label, value=v, description=desc,
-                                                          default=v in self.food)
-                                     for v, label, desc in FOOD_OPTIONS])
+                                     discord.SelectOption(label=label, value=label, default=label in self.food)
+                                     for label, _ in FOOD_OPTIONS])
         food.callback = self._on_food
-        self.add_item(food)
-        budget = discord.ui.Select(placeholder="Most you'd spend per hangout", row=3, options=[
-            discord.SelectOption(label=f"Up to ${b}" if b < 100 else "$100+ (no real limit)", value=str(b),
+        for item in (days, times, food):
+            self.add_item(item)
+        budget = discord.ui.Select(placeholder="4. Most you'd spend per hangout", row=3, options=[
+            discord.SelectOption(label=f"Up to ${b}" if b < 50 else "$50 or more", value=str(b),
                                  default=abs(self.budget - b) < 0.01) for b in BUDGETS])
         budget.callback = self._on_budget
         self.add_item(budget)
@@ -113,21 +130,22 @@ class SetupPanel(discord.ui.View):
     @staticmethod
     def embed() -> discord.Embed:
         return discord.Embed(title="🔒 Set up your private agent", colour=PURPLE, description=(
-            "Tap what applies, then **Save**. Only you can see this, and only free/busy ever leaves your agent.\n\n"
+            "Pick your days, then your times, then **Save**. Only you can see this, and only free/busy ever leaves "
+            "your agent. Different times on different days? Use ⌨️ Type it instead.\n\n"
             "📅 **Use Google Calendar?** Link it and your busy times fill in by themselves.\n"
             "⌨️ Rather type? Write your week however you like."))
 
-    def _select(self, slots: list[str], placeholder: str, key: str, row: int) -> None:
-        sel = discord.ui.Select(placeholder=placeholder, min_values=0, max_values=len(slots), row=row, options=[
-            discord.SelectOption(label=s, value=s, description=_block_hours(s), default=s in self.free)
-            for s in slots])
+    @property
+    def free(self) -> list[str]:
+        return [f"{DAYS[d]} {t}" for d in sorted(self.days) for t in BLOCKS if t in self.times]
 
-        async def cb(interaction: discord.Interaction):
-            mine = set(slots)
-            self.free = [f for f in self.free if f not in mine] + list(sel.values)
-            await interaction.response.defer()
-        sel.callback = cb
-        self.add_item(sel)
+    async def _on_days(self, interaction: discord.Interaction):
+        self.days = [int(v) for v in interaction.data.get("values", [])]
+        await interaction.response.defer()
+
+    async def _on_times(self, interaction: discord.Interaction):
+        self.times = list(interaction.data.get("values", []))
+        await interaction.response.defer()
 
     async def _on_food(self, interaction: discord.Interaction):
         self.food = list(interaction.data.get("values", []))
@@ -139,6 +157,8 @@ class SetupPanel(discord.ui.View):
 
     def build(self, user: discord.abc.User) -> Profile:
         base = self.existing or Profile(name=user.display_name)
+        if self.days and not self.times:  # picked days but no times: free all day on those days
+            self.times = list(BLOCKS)
         if self.free:
             commitments = busy_from_free(self.free)
         elif base.free_blocks:  # they un-picked everything
@@ -147,11 +167,17 @@ class SetupPanel(discord.ui.View):
             commitments = list(base.commitments)
         earliest = "08:00" if any(f.endswith("morning") for f in self.free) else base.earliest
         return Profile(name=user.display_name, user_id=str(user.id), commitments=commitments,
-                       budget=self.budget, diet=[f[5:] for f in self.food if f.startswith("diet:")],
-                       allergies=[f[3:] for f in self.food if f.startswith("no:")],
+                       budget=self.budget, diet=self._food("diet"), allergies=self._food("allergies"),
                        max_walk_min=max(1, min(60, base.max_walk_min)), earliest=earliest, latest=base.latest,
-                       no_go_days=list(base.no_go_days), free_blocks=sorted(self.free, key=_slot_order),
+                       no_go_days=list(base.no_go_days), free_blocks=self.free,
                        calendar_url=self.calendar_url)
+
+    def _food(self, kind: str) -> list[str]:
+        picked = dict(FOOD_OPTIONS)
+        out: list[str] = []
+        for label in self.food:
+            out += [x for x in picked.get(label, {}).get(kind, []) if x not in out]
+        return out
 
     @discord.ui.button(label="Save", emoji="✅", style=discord.ButtonStyle.success, row=4)
     async def save(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -178,11 +204,6 @@ class SetupPanel(discord.ui.View):
 def _block_hours(slot: str) -> str:
     start, end = BLOCKS[slot.split(" ", 1)[1]]
     return f"{fmt_clock(time.fromisoformat(start))}–{'midnight' if end == '23:59' else fmt_clock(time.fromisoformat(end))}"
-
-
-def _slot_order(slot: str) -> tuple[int, int]:
-    day, block = slot.split(" ", 1)
-    return DAYS.index(day), list(BLOCKS).index(block)
 
 
 class CalendarModal(discord.ui.Modal, title="Link your calendar"):

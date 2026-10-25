@@ -171,14 +171,17 @@ class DiscordBotTests(unittest.TestCase):
             joined = await press(it.view, "I'm in", friend, channel)
             panel = joined.view  # no profile yet: the tap-to-pick setup card comes first
             self.assertIsInstance(panel, db.SetupPanel)
-            panel.free = ["Sat evening", "Sat late night", "Sun afternoon"]
-            food = FakeInteraction(friend, channel)
-            food.data = {"values": ["diet:vegetarian", "no:peanut"]}
-            await panel._on_food(food)
+            for handler, values in ((panel._on_days, ["5", "6"]), (panel._on_times, ["evening", "late night"]),
+                                    (panel._on_food, ["Vegetarian", "No nuts"])):
+                pick = FakeInteraction(friend, channel)
+                pick.data = {"values": values}
+                await handler(pick)
             await press(panel, "Save", friend, channel)
             self.assertIn(friend.id, run.members)
             saved = bot.store.get("2")
-            self.assertEqual((saved.diet, saved.allergies), (["vegetarian"], ["peanut"]))
+            self.assertEqual((saved.diet, saved.allergies), (["vegetarian"], ["peanut", "tree-nut"]))
+            self.assertEqual(saved.free_blocks, ["Sat evening", "Sat late night", "Sun evening", "Sun late night"])
+            self.assertEqual(db.SetupPanel(bot, saved).food, ["Vegetarian", "No nuts"])  # re-opening keeps picks
             await press(run.view(), "Start", host, channel)
             for _ in range(200):
                 await asyncio.sleep(0.01)
