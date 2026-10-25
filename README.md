@@ -10,7 +10,7 @@ what's needed: free/busy windows, pooled filters nobody can trace back to a pers
 person sets up once in private, and the group gets one plan card with a time, who's going, a place the group names,
 a calendar invite and a fair bill split.
 
-Built for the [Cubbie Hackathon](https://hackathon.cubbie.ai), Track 2.
+Built for the [Cubbie Hackathon](https://hackathon.cubbie.ai), Track 2 (Agent-to-Agent Coordination).
 
 ## Demo video (1:43)
 
@@ -26,28 +26,30 @@ are sample data.
 
 | Track 2 asks | Free Tonight |
 | --- | --- |
-| An AI that joins a group chat and makes it more useful | Add the bot to a Discord server; `/plan dinner weeknights` turns "anyone free?" into one plan card, updated in place in the channel |
-| Something students would actually invite into their group | Setup is a tap-through card; joining is one tap (I'm in). The bot posts the verdict the moment agents finish (works out or not, who's going, who's busy), a one-tap poll only when days tie, a calendar invite, a copy card for iMessage or GroupMe, and a bill split to the cent |
-| Tied to real campus life | Plans around class schedules, TA hours and shifts, plus campus budgets, dietary needs, allergies and walking distance |
-| Working prototype on a real scenario | Live Discord bot, a no-account terminal demo, and tests that run a full `/plan` against fake Discord members |
-| Multi-agent: conflicting constraints, what they share, when they confirm | Each friend gets a private agent. When nobody fits, agents ask their owner in a DM about *flexible* commitments ("leave study group 30 min early?"); budget, diet, allergy and distance clashes knock places out without saying whose they were. Only free windows, pooled filters (budget rounded down to $5) and yes/no answers are shared, shown line by line in the **privacy ledger**. Agents ask only before trimming a flexible commitment; nobody has to double-check a time their agent already knows they're free for, and a **Can't go** button handles changes |
+| Personal AI agents for campus life that work with each other | Every friend gets a `PersonalAgent` that holds their private profile. The host's agent runs the plan over only what the other agents choose to share (`freetonight/agent.py`, `freetonight/negotiation.py`) |
+| Agents exchange the information that matters | Free/busy windows, pooled food and distance filters with no names attached, budgets rounded down to $5, and yes/no answers. Every message is recorded in the **privacy ledger** with what was shared and what stayed private |
+| Working toward a shared outcome | One plan card in the Discord channel: time, who's going, a place the group names, a calendar invite, a copy card for iMessage or GroupMe, and a bill split to the cent |
+| Conflicting constraints | When no time fits everyone, an agent checks its owner's *flexible* commitments. Budget, diet, allergy and distance clashes knock places out, and each agent declines with a category only (budget, distance, food), never whose it was |
+| When agents ask their student to confirm | Only before trimming a flexible commitment ("leave study group 30 min early?"), by DM, and only "yes" or "no" comes back. Agents never ask about a time they already know is free; **Can't go** handles changes |
+| A working prototype tied to a real campus scenario | Live Discord bot, a no-account terminal demo, and tests that run a full `/plan` against fake Discord members. It plans around classes, TA hours and shifts, campus budgets, dietary needs and walking distance |
+| A reason students would say "We need this" | "Anyone free this week?" usually dies at "free sometime". Nobody has to paste their calendar, admit a budget, or explain an allergy to the group |
 
 ## How a plan happens
 
 1. **Setup, once, privately.** `/setup` shows a card only you see with four menus: the days you're usually free,
    then the times on those days (morning, afternoon, evening, late night), food needs or allergies (vegetarian,
    vegan, halal, kosher, no nuts, no seafood, no gluten, no dairy, no eggs, no soy or sesame), and the most you'd
-   spend (up to $10, $20, $0, or $50 or more). Tap **Save**. Or **link Google Calendar** (its secret iCal address)
+   spend (up to $10, $20, $30, or $50 or more). Tap **Save**. Or **link Google Calendar** (its secret iCal address)
    and busy times fill in by themselves, re-read on every plan. Or **type your week** in any format; lines it can't
    read are skipped, and with an Anthropic key Claude reads the messy ones. Mark anything flexible with
-   `(flex 0)`.
+   `(flex 30)`.
 2. **Kickoff.** Someone types `/plan dinner weeknights` in the group channel (activities: dinner, lunch, coffee,
    study, movie, games; days: tonight, tomorrow, weeknights, this week, this weekend). Friends tap **I'm in**. The
    host taps **Start**. Anyone who hasn't set up yet gets the setup card first.
-. **Round 1, availability.** Each agent puts free windows on the table. Never class names, never reasons.
+3. **Round 1, availability.** Each agent puts free windows on the table. Never class names, never reasons.
 4. **Round 2, filters.** Agents pool their filters anonymously: "needs halal and vegetarian options, avoid
    peanuts, under $10, 12 min walk". Nobody learns whose filter is whose, and exact budgets never leave an agent.
-5. **Round , time.** The host agent finds the best slot from the shared windows. If someone is short, their
+5. **Round 3, time.** The host agent finds the best slot from the shared windows. If someone is short, their
    agent checks *privately* whether a flexible commitment could move, and asks its owner in a DM. Only "yes" or
    "no" comes back.
 6. **Round 4, places.** Listed places are ranked against the pooled filters, and every agent checks each one
@@ -56,7 +58,7 @@ are sample data.
 7. **Round 5, vote.** If two or more options tie, the group gets a one-tap poll.
 8. **Place.** The group names the place: type it in `/plan place:` or tap **📍 Set place** on the card (with minutes from campus). Listed places that fit everyone's filters show only as suggestions.
 9. **Round 6, verdict.** Each agent already knows from its owner's schedule whether they're free, so there are no
-   confirm DMs. The bot posts right away: "✅ It works out! Dinner · Tue, Oct 27 · 7:0pm–9pm · 🙋 Going (5): … ·
+   confirm DMs. The bot posts right away: "✅ It works out! Dinner · Tue, Oct 27 · 7:30pm–9pm · 🙋 Going (5): … ·
    🚫 Busy then (1): …" (or why it doesn't work out). Plans change? Tap **✋ Can't go** on the card; tap again to
    be back in.
 10. **Locked.** One card in the channel, updated in place the whole time: time, place, who's going, who can't,
@@ -72,26 +74,26 @@ are sample data.
 | Food | Pooled "needs options for…" / "must avoid…" | Which person has which need |
 | Flexibility | "Yes, I can make it" | What you're skipping and for how long |
 
-## Try it in 0 seconds (no accounts)
+## Try it in 30 seconds (no accounts)
 
-Python .9+. The core uses only the standard library.
+Python 3.9+. The core uses only the standard library.
 
 ```bash
 git clone https://github.com/jathinravilla/free-tonight && cd free-tonight
-python -m freetonight demo              # 5 friends plan dinner; writes out/ledger.html
-python -m freetonight demo --interactive   # answer each friend's DMs yourself
+python3 -m freetonight demo              # 5 friends plan dinner; writes out/ledger.html
+python3 -m freetonight demo --interactive   # answer each friend's DMs yourself
 open out/ledger.html                     # the privacy ledger (xdg-open on Linux)
 ```
 
 What you'll see: the best time from free windows reaches 4 of 5 friends, so Maya's and Sam's agents privately ask
-them to trim a study group and a rehearsal by 0 minutes. Both say yes, the agents pick Halal Bros Grill (halal,
+them to trim a study group and a rehearsal by 30 minutes. Both say yes, the agents pick Halal Bros Grill (halal,
 vegetarian-friendly, peanut-safe, about $10, under everyone's budget), and the plan locks: 4 going and Sam as a
 maybe. The terminal demo also shows the optional confirm step, which the Discord bot skips.
 
 Other commands:
 
 ```bash
-python -m freetonight split --items "Maya=14.5,Jordan=22,Priya=9.99" --tax 4.07 --tip 18
+python3 -m freetonight split --items "Maya=14.5,Jordan=22,Priya=9.99" --tax 4.07 --tip 18
 python3 -m freetonight split 86.40 --people Maya,Jordan,Priya
 python3 -m freetonight parse "MWF 9-10:15 CS 201; Tue 6-8pm study group (flex 30)"
 ```
