@@ -1074,7 +1074,7 @@ def register_commands(bot: FreeTonightBot) -> None:
 
     @tree.command(name="help", description="How Free Tonight works")
     async def help_cmd(interaction: discord.Interaction):
-        e = discord.Embed(title="🌙 Free Tonight", colour=ORANGE, description=(
+        e = discord.Embed(title="🍸 Free Tonight", colour=ORANGE, description=(
             "Everyone gets a private agent. Agents plan together; you only answer yes or no.\n\n"
             "**/setup** tap your free times and food, or link Google Calendar (only you see it)\n"
             "**/plan** start a hangout in this channel; friends tap I'm in\n"
