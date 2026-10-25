@@ -80,6 +80,12 @@ python3 -m freetonight split 86.40 --people Maya,Jordan,Priya
 python3 -m freetonight parse "MWF 9-10:15 CS 201; Tue 6-8pm study group (flex 30)"
 ```
 
+## Add it to your server
+
+[Add Free Tonight to Discord](https://discord.com/oauth2/authorize?client_id=1563675486154924082&scope=bot+applications.commands&permissions=117760),
+then type `/setup` and `/plan`. To host your own copy, see [docs/PUBLISHING.md](docs/PUBLISHING.md).
+[Privacy policy](PRIVACY.md) · [Terms](TERMS.md)
+
 ## Run the Discord bot
 
 1. Create an application at the [Discord Developer Portal](https://discord.com/developers/applications), add a
@@ -141,7 +147,7 @@ freetonight/
   discord_bot.py   Slash commands, tap-to-pick setup, DM questions, live plan card, poll, buttons
   store.py         SQLite, one row per person
 cubbie-skill/      The Cubbie Skill (SKILL.md + scripts/ft_card.py)
-tests/             30 tests, including a full /plan run against fake Discord members
+tests/             31 tests, including a full /plan run against fake Discord members
 ```
 
 Decisions are deterministic code, so a demo never hangs on a model call. Claude is used only where language is

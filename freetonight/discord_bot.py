@@ -13,6 +13,7 @@ import io
 import logging
 import os
 import re
+import time as time_mod
 from datetime import datetime, time, timedelta
 
 import discord
@@ -62,6 +63,78 @@ STAGES = [
 ]
 
 
+# ---------------------------------------------------------------- guard rails
+
+RATE_LIMIT = (8, 10.0)  # at most 8 taps or commands per person every 10 seconds
+_recent: dict[int, list[float]] = {}
+
+
+def rate_ok(user_id: int, now: float | None = None) -> bool:
+    """Per-person limit across commands, buttons and pop-ups, so nobody can flood the bot."""
+    now = time_mod.monotonic() if now is None else now
+    limit, window = RATE_LIMIT
+    hits = [t for t in _recent.get(user_id, []) if now - t < window]
+    ok = len(hits) < limit
+    if ok:
+        hits.append(now)
+    _recent[user_id] = hits
+    if len(_recent) > 5000:  # forget idle people
+        for uid in [u for u, h in _recent.items() if not h or now - h[-1] > window]:
+            _recent.pop(uid, None)
+    return ok
+
+
+async def say_privately(interaction: discord.Interaction, text: str) -> None:
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(text, ephemeral=True)
+        else:
+            await interaction.response.send_message(text, ephemeral=True)
+    except discord.HTTPException:
+        pass
+
+
+SLOW_DOWN = "Slow down a sec, then try again."
+OOPS = "Something went wrong there. Try again, or run /help."
+
+
+class SafeView(discord.ui.View):
+    """Every button and menu: rate limited, and a crash shows a friendly line instead of 'interaction failed'."""
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not rate_ok(interaction.user.id):
+            await say_privately(interaction, SLOW_DOWN)
+            return False
+        return True
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
+        log.error("Button failed", exc_info=error)
+        await say_privately(interaction, OOPS)
+
+
+class SafeModal(discord.ui.Modal):
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        log.error("Pop-up failed", exc_info=error)
+        await say_privately(interaction, OOPS)
+
+
+class SafeTree(app_commands.CommandTree):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not rate_ok(interaction.user.id):
+            await say_privately(interaction, SLOW_DOWN)
+            return False
+        return True
+
+    async def on_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+        if isinstance(error, app_commands.NoPrivateMessage):
+            await say_privately(interaction, "Use /plan in a server channel with your friends.")
+            return
+        if isinstance(error, app_commands.CheckFailure):
+            return
+        log.error("Command failed", exc_info=error)
+        await say_privately(interaction, OOPS)
+
+
 # ---------------------------------------------------------------- profile setup
 
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -89,7 +162,7 @@ def _loose(text: str, parse) -> tuple[list[str], list[str]]:
     return ok, unknown
 
 
-class SetupPanel(discord.ui.View):
+class SetupPanel(SafeView):
     """Tap-to-pick setup: free times, food, budget, with a calendar link and typing as options."""
 
     def __init__(self, bot: "FreeTonightBot", existing: Profile | None = None, after=None):
@@ -205,7 +278,7 @@ def _block_hours(slot: str) -> str:
     return f"{fmt_clock(time.fromisoformat(start))}–{'midnight' if end == '23:59' else fmt_clock(time.fromisoformat(end))}"
 
 
-class CalendarModal(discord.ui.Modal, title="Link your calendar"):
+class CalendarModal(SafeModal, title="Link your calendar"):
     url = discord.ui.TextInput(label="Secret address in iCal format", max_length=500, required=False,
                                placeholder="https://calendar.google.com/calendar/ical/.../basic.ics")
 
@@ -237,7 +310,7 @@ class CalendarModal(discord.ui.Modal, title="Link your calendar"):
             "Now press **Save** on the setup card.", ephemeral=True)
 
 
-class SetupModal(discord.ui.Modal, title="Type your week"):
+class SetupModal(SafeModal, title="Type your week"):
     schedule = discord.ui.TextInput(
         label="When are you busy? Any format", style=discord.TextStyle.paragraph,
         placeholder="MWF 9-10:15 CS 201\nTue 6-8pm study group (flex 30)\nThu 5-7:30pm work shift",
@@ -314,7 +387,7 @@ class SetupModal(discord.ui.Modal, title="Type your week"):
             await self.after(interaction, profile)
 
 
-class RetrySetupView(discord.ui.View):
+class RetrySetupView(SafeView):
     def __init__(self, bot: "FreeTonightBot", modal: SetupModal):
         super().__init__(timeout=600)
         self.bot, self.modal = bot, modal
@@ -360,7 +433,7 @@ def profile_embed(p: Profile, title: str) -> discord.Embed:
     return e
 
 
-class ProfileView(discord.ui.View):
+class ProfileView(SafeView):
     def __init__(self, bot: "FreeTonightBot", profile: Profile):
         super().__init__(timeout=600)
         self.bot, self.profile = bot, profile
@@ -378,7 +451,7 @@ class ProfileView(discord.ui.View):
 
 # ---------------------------------------------------------------- asking an owner privately
 
-class AnswerView(discord.ui.View):
+class AnswerView(SafeView):
     def __init__(self, owner_id: int, options: list[str], future: asyncio.Future):
         super().__init__(timeout=OWNER_TIMEOUT)
         self.owner_id, self.future = owner_id, future
@@ -439,6 +512,7 @@ class PlanRun:
         self.result: PlanResult | None = None
         self.started = False
         self.task: asyncio.Task | None = None
+        self.names: dict[int, str] = {}  # user id -> name in this plan (made unique)
         self.created = datetime.now()
 
     @property
@@ -486,7 +560,7 @@ class PlanRun:
         if self.stage == "joining":
             return JoinView(self)
         if self.result and self.result.status == "locked":
-            return LockedView(self.bot, self.result)
+            return LockedView(self.bot, self.result, self.names)
         return None
 
     async def progress(self, stage: str, detail: str) -> None:
@@ -494,6 +568,19 @@ class PlanRun:
         await self.refresh()
 
     async def start(self) -> None:
+        try:
+            await self._start()
+        except Exception:
+            log.exception("Planning failed")
+            try:
+                await self.channel.send("Something went wrong while planning. Try /plan again.")
+            except discord.HTTPException:
+                pass
+        finally:
+            if self.bot.runs.get(getattr(self.channel, "id", 0)) is self:
+                self.bot.runs.pop(getattr(self.channel, "id", 0), None)
+
+    async def _start(self) -> None:
         self.started = True
         self.stage = "gathering"
         await self.refresh()
@@ -501,30 +588,32 @@ class PlanRun:
         now = datetime.now()
         dates = upcoming_dates(now.date(), self.when)
         profiles = {uid: self.bot.store.get(str(uid)) for uid in self.members}
+        gone = [m.display_name for uid, m in self.members.items() if not profiles[uid]]
+        profiles = {uid: p for uid, p in profiles.items() if p}  # someone ran /forget after joining
+        if len(profiles) < 2:
+            self.stage = "done"
+            await self.channel.send("Not enough people still have an agent set up"
+                                    + (f" ({', '.join(gone)} deleted theirs)" if gone else "") + ". Run /plan again.")
+            return
+        self.names = unique_names({uid: self.members[uid].display_name for uid in profiles})
         await self._read_calendars(profiles, dates)
-        for uid, member in self.members.items():
-            profile = profiles[uid]
-            profile.name = member.display_name
+        for uid, profile in profiles.items():
+            member = self.members[uid]
+            profile.name = self.names[uid]
 
             def make_ask(m=member):
                 async def ask(q: OwnerQuestion) -> str:
                     return await ask_member(m, self.channel, q, "no" if q.kind == "relax" else "maybe")
                 return ask
             agents.append(PersonalAgent(profile, make_ask()))
-        session = PlanSession(agents, self.host.display_name, self.activity,
+        session = PlanSession(agents, self.names.get(self.host.id, self.host.display_name), self.activity,
                               dates, self.bot.venues, minutes=self.minutes,
                               now=now, progress=self.progress, poll=self.poll, confirm=False,
                               auto_place=False, place=self.place)
-        try:
-            self.result = await session.run()
-        except Exception:
-            log.exception("Planning failed")
-            await self.channel.send("Something went wrong while planning. Try /plan again.")
-            self.bot.runs.pop(getattr(self.channel, "id", 0), None)
-            return
+        self.result = await session.run()
         self.stage = "locked" if self.result.status == "locked" else "done"
-        await self.refresh()
         self.bot.runs.pop(getattr(self.channel, "id", 0), None)
+        await self.refresh()
         await self.channel.send(self.announcement())
 
     def announcement(self) -> str:
@@ -533,7 +622,7 @@ class PlanRun:
         if r.status != "locked":
             return ("❌ **It doesn't work out this time.** There's no time when 2 or more of you are free. "
                     "Try `/plan` with *this week* or a shorter hangout.")
-        going = [m.mention for m in self.members.values() if m.display_name in r.confirmed]
+        going = [m.mention for uid, m in self.members.items() if self.names.get(uid) in r.confirmed]
         v = r.plan.venue
         lines = [f"✅ **It works out!** {r.plan.kind.title()} · {cards.when_line(r.plan.start, r.plan.end)}",
                  f"📍 {v.name} · {v.distance}" if v else "📍 Place not picked yet: tap **Set place** on the card.",
@@ -575,7 +664,7 @@ class PlanRun:
         return winner
 
 
-class JoinView(discord.ui.View):
+class JoinView(SafeView):
     def __init__(self, run: PlanRun):
         super().__init__(timeout=JOIN_SECONDS)
         self.run = run
@@ -616,6 +705,9 @@ class JoinView(discord.ui.View):
 
     @discord.ui.button(label="Out", style=discord.ButtonStyle.secondary)
     async def leave(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if self.run.started:
+            await interaction.response.send_message("Planning already started.", ephemeral=True)
+            return
         if interaction.user.id == self.run.host.id:
             await interaction.response.send_message("You're hosting; use Cancel instead.", ephemeral=True)
             return
@@ -633,6 +725,7 @@ class JoinView(discord.ui.View):
         if self.run.started:
             await interaction.response.defer()
             return
+        self.run.started = True  # set before yielding, so a double-tap can't start two plans
         await interaction.response.defer()
         self.stop()
         self.run.task = asyncio.create_task(self.run.start())
@@ -647,7 +740,7 @@ class JoinView(discord.ui.View):
         await interaction.response.edit_message(content="Plan cancelled.", embed=None, view=None)
 
 
-class PollView(discord.ui.View):
+class PollView(SafeView):
     def __init__(self, run: PlanRun, options: list[str]):
         super().__init__(timeout=POLL_SECONDS + 30)
         self.run, self.options = run, options
@@ -725,10 +818,13 @@ def locked_embed(r: PlanResult) -> discord.Embed:
     return e
 
 
-class LockedView(discord.ui.View):
-    def __init__(self, bot: "FreeTonightBot", result: PlanResult):
-        super().__init__(timeout=None)
-        self.bot, self.result = bot, result
+class LockedView(SafeView):
+    def __init__(self, bot: "FreeTonightBot", result: PlanResult, names: dict[int, str] | None = None):
+        super().__init__(timeout=7 * 24 * 3600)  # a week of buttons; don't hold every old plan in memory forever
+        self.bot, self.result, self.names = bot, result, names or {}
+
+    def name_of(self, user: discord.abc.User) -> str:
+        return self.names.get(user.id, user.display_name)
 
     @discord.ui.button(label="Add to calendar", emoji="📅", style=discord.ButtonStyle.primary)
     async def cal(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -760,14 +856,14 @@ class LockedView(discord.ui.View):
     @discord.ui.button(label="Set place", emoji="📍", style=discord.ButtonStyle.primary, row=1)
     async def set_place(self, interaction: discord.Interaction, _: discord.ui.Button):
         r = self.result
-        if interaction.user.display_name not in r.confirmed + r.maybe + r.declined:
+        if self.name_of(interaction.user) not in r.confirmed + r.maybe + r.declined:
             await interaction.response.send_message("Only people in this plan can set the place.", ephemeral=True)
             return
         await interaction.response.send_modal(PlaceModal(self))
 
     @discord.ui.button(label="Can't go", emoji="✋", style=discord.ButtonStyle.danger, row=1)
     async def cant(self, interaction: discord.Interaction, _: discord.ui.Button):
-        r, name = self.result, interaction.user.display_name
+        r, name = self.result, self.name_of(interaction.user)
         if name in r.confirmed or name in r.maybe:
             r.confirmed = [n for n in r.confirmed if n != name]
             r.maybe = [n for n in r.maybe if n != name]
@@ -789,12 +885,23 @@ class LockedView(discord.ui.View):
                                             "Start a new `/plan` if you still want to hang out.")
 
 
+def unique_names(names: dict[int, str]) -> dict[int, str]:
+    """Two people with the same display name must not share an agent: number the repeats."""
+    seen: dict[str, int] = {}
+    out = {}
+    for uid, name in names.items():
+        base = " ".join(name.split())[:40] or "Friend"
+        seen[base] = seen.get(base, 0) + 1
+        out[uid] = base if seen[base] == 1 else f"{base} ({seen[base]})"
+    return out
+
+
 def custom_place(name: str, activity: str, minutes: int = 0) -> Venue:
     clean = " ".join(name.replace("`", "'").split())[:100]
     return Venue(name=clean, kinds=[activity], price_pp=0, walk_min=minutes, custom=True)
 
 
-class PlaceModal(discord.ui.Modal, title="Where are we going?"):
+class PlaceModal(SafeModal, title="Where are we going?"):
     name = discord.ui.TextInput(label="Place name", placeholder="Chipotle on Main St", max_length=100)
     minutes = discord.ui.TextInput(label="Minutes from campus (optional)", placeholder="10", required=False,
                                    max_length=3)
@@ -823,7 +930,7 @@ class PlaceModal(discord.ui.Modal, title="Where are we going?"):
                                         f"**{r.plan.venue.name}** ({r.plan.venue.distance}).")
 
 
-class SplitModal(discord.ui.Modal, title="Split the bill"):
+class SplitModal(SafeModal, title="Split the bill"):
     total = discord.ui.TextInput(label="Total with tax (even split)", placeholder="86.40", required=False,
                                  max_length=12)
     items = discord.ui.TextInput(label="Or itemized: one 'name amount' per line", style=discord.TextStyle.paragraph,
@@ -869,7 +976,7 @@ class SplitModal(discord.ui.Modal, title="Split the bill"):
 
 class FreeTonightBot(commands.Bot):
     def __init__(self, db_path: str = "freetonight.db", venues_path: str | None = None):
-        super().__init__(command_prefix=commands.when_mentioned, intents=discord.Intents.default(),
+        super().__init__(command_prefix=commands.when_mentioned, intents=discord.Intents.default(), tree_cls=SafeTree,
                          allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True))
         self.store = ProfileStore(db_path)
         self.venues = load_venues(venues_path)
@@ -928,6 +1035,7 @@ def register_commands(bot: FreeTonightBot) -> None:
         await interaction.response.send_message("🗑️ Deleted." if gone else "Nothing to delete.", ephemeral=True)
 
     @tree.command(name="plan", description="Plan a hangout with this group")
+    @app_commands.guild_only()
     @app_commands.describe(activity="What are we doing?", when="Which days to look at",
                            minutes="How long (optional; defaults per activity)",
                            place="Where? Type a name, or leave empty and set it on the card later")

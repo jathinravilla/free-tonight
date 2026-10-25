@@ -245,6 +245,40 @@ class DiscordBotTests(unittest.TestCase):
         self.assertEqual(len(p.commitments), 2)  # the unreadable line is skipped, not fatal
         self.assertEqual((p.diet, p.allergies, p.max_walk_min, p.latest), (["vegetarian"], ["peanut"], 15, "23:00"))
 
+    def test_guard_rails(self):
+        self.assertTrue(all(db.rate_ok(99, now=100.0 + i * 0.1) for i in range(8)))
+        self.assertFalse(db.rate_ok(99, now=101.0))  # 9th tap inside 10 seconds
+        self.assertTrue(db.rate_ok(99, now=120.0))
+        self.assertEqual(db.unique_names({1: "Sam", 2: "Sam", 3: "Leo"}), {1: "Sam", 2: "Sam (2)", 3: "Leo"})
+
+        async def go():
+            bot = db.FreeTonightBot(self.dbpath)
+            self.assertTrue(bot.tree.get_command("plan").guild_only)
+            channel = FakeChannel()
+            a, b = FakeMember(1, "Sam"), FakeMember(2, "Sam")
+            for m in (a, b):
+                bot.store.put(Profile(name="Sam", user_id=str(m.id)))
+            run = db.PlanRun(bot, channel, a, "coffee", "this week", None)
+            run.members[b.id] = b
+            bot.runs[channel.id] = run
+            view = run.view()
+            await press(view, "Start", a, channel)
+            await press(view, "Start", a, channel)  # double tap
+            started = [t for t in asyncio.all_tasks() if "start" in repr(t.get_coro())]
+            await run.task
+            # Someone deletes their agent after joining: the plan says so instead of crashing.
+            run2 = db.PlanRun(bot, channel, a, "coffee", "this week", None)
+            run2.members[b.id] = b
+            bot.store.delete("2")
+            await run2.start()
+            await bot.close()
+            return run, len(started), channel
+        run, n_tasks, channel = asyncio.run(go())
+        self.assertEqual(n_tasks, 1)
+        self.assertEqual(sorted(run.names.values()), ["Sam", "Sam (2)"])
+        self.assertIn("deleted theirs", channel.sent[-1][0])
+        self.assertNotIn(channel.id, run.bot.runs)
+
     def test_split_modal_and_poll_embed(self):
         async def go():
             m = db.SplitModal(["Maya", "Jordan"])
