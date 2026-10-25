@@ -59,6 +59,7 @@ class PlanResult:
     near_misses: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     ledger: Ledger = field(default_factory=Ledger)
+    suggestions: list[Venue] = field(default_factory=list)  # ideas when the group picks the place itself
 
 
 async def _noop_progress(stage: str, detail: str) -> None:
@@ -69,7 +70,7 @@ class PlanSession:
     def __init__(self, agents: list[PersonalAgent], host: str, activity: str, dates: list[date],
                  venues: list[Venue], *, minutes: int | None = None, now: datetime | None = None,
                  progress: Progress | None = None, poll: Poll | None = None, step_minutes: int = 15,
-                 confirm: bool = True):
+                 confirm: bool = True, auto_place: bool = True, place: Venue | None = None):
         if activity not in ACTIVITIES:
             raise ValueError(f"Unknown activity {activity!r}. Try: {', '.join(ACTIVITIES)}")
         if len(agents) < 2:
@@ -87,6 +88,9 @@ class PlanSession:
         self.step = timedelta(minutes=step_minutes)
         # confirm=False: agents already know from each schedule who's free, so nobody is asked to double-check.
         self.confirm = confirm
+        # auto_place=False: the group names the place (now via `place`, or later); listed venues are only ideas.
+        self.auto_place = auto_place
+        self.place = place
         self.ledger = Ledger()
 
     # ---- Round 1 and 2: what goes on the table ---------------------------------------
@@ -248,15 +252,17 @@ class PlanSession:
             if key in seen_days:
                 continue
             seen_days.add(key)
-            venue, near = self._pick_venue(c, filters)
+            venue, near = (self.place, []) if self.place else self._pick_venue(c, filters)
             options.append((c, venue, near))
             if len([o for o in options if o[1]]) >= 3:
                 break
-        with_place = [o for o in options if o[1]]
+        with_place = [o for o in options if o[1]] if self.auto_place else options[:3]
         chosen = with_place[0] if with_place else options[0]
 
         if self.poll and len(with_place) > 1:
-            labels = [f"{fmt_slot(c.start, c.end)} · {v.name} (${v.price_pp:.0f})" for c, v, _ in with_place]
+            labels = [fmt_slot(c.start, c.end) + (f" · {v.name}" + (f" (${v.price_pp:.0f})" if not v.custom else "")
+                                                   if v and self.auto_place or self.place else "")
+                      for c, v, _ in with_place]
             await self.progress("polling", "Two or more options tie, so the group gets a vote")
             idx = await self.poll(labels)
             idx = idx if 0 <= idx < len(with_place) else 0
@@ -265,8 +271,12 @@ class PlanSession:
                             shared={"options": labels, "winner": labels[idx]}, human=True)
 
         c, venue, near = chosen
+        suggestions: list[Venue] = []
+        if not self.auto_place:
+            suggestions = [v for v, broken in rank(self.venues, act.name, filters, c.start, c.end) if not broken][:3]
+            venue = self.place
         plan = Plan(act.name, c.start, c.end, venue, list(c.attendees))
-        cost = venue.price_pp if venue else 0.0
+        cost = venue.price_pp if venue and not venue.custom else 0.0
         if self.confirm:
             await self.progress("confirming", f"Waiting on {len(plan.attendees)} confirmations")
             answers = await asyncio.gather(*[self.by_name[n].confirm(plan, cost, self.ledger, "6 · Confirm",
@@ -283,7 +293,7 @@ class PlanSession:
         plan.attendees = confirmed + maybe
         unavailable = [n for n in self.by_name if n not in c.attendees]
         notes = []
-        if not venue:
+        if not venue and self.auto_place:
             notes.append("No place fits every filter at that time, so pick one in chat.")
         if len(confirmed) + len(maybe) < 2:
             self.ledger.add("6 · Confirm", self.host, "table", "lock", "Plan fell through: fewer than 2 said yes")
@@ -293,7 +303,7 @@ class PlanSession:
                         shared={"plan": plan.label, "going": confirmed, "maybe": maybe})
         await self.progress("locked", plan.label)
         return PlanResult("locked", plan, confirmed, maybe, declined, unavailable, cost, filters, near, notes,
-                          self.ledger)
+                          self.ledger, suggestions)
 
 
 def describe_result(r: PlanResult) -> str:

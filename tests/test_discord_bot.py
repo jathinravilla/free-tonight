@@ -145,7 +145,20 @@ class DiscordBotTests(unittest.TestCase):
 
         run, channel = asyncio.run(go())
         self.assertEqual(run.result.status, "locked")
-        self.assertEqual(run.result.plan.venue.name, "Halal Bros Grill")
+        # The bot doesn't pick a place; listed places that fit everyone are only suggestions.
+        self.assertIsNone(run.result.plan.venue)
+        self.assertEqual(run.result.suggestions[0].name, "Halal Bros Grill")
+        self.assertIn("Set place", channel.sent[-1][0])
+
+        async def set_place():
+            view = db.LockedView(run.bot, run.result)
+            it = await press(view, "Set place", FakeMember(1, "Maya"), channel)
+            m = it.modal
+            m.name._value, m.minutes._value = "Chipotle on Main", "12"
+            await m.on_submit(FakeInteraction(FakeMember(1, "Maya"), channel))
+            return db.locked_embed(run.result)
+        embed = asyncio.run(set_place())
+        self.assertTrue(embed.description.startswith("📍 **Chipotle on Main** · 12 min from campus\n🕒"))
         final = run.message.edits[-1]
         self.assertIn("is on", final["embed"].title)
         self.assertIsInstance(final["view"], db.LockedView)

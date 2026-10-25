@@ -25,6 +25,11 @@ class Venue:
     rating: float = 4.0
     area: str = ""
     url: str = ""
+    custom: bool = False  # typed in by the group; price and filters unknown
+
+    @property
+    def distance(self) -> str:
+        return f"{self.walk_min} min from campus" if self.walk_min else "distance not given"
 
     def open_during(self, start: datetime, end: datetime) -> bool:
         span = self.hours.get(DAYS[start.weekday()]) or self.hours.get("*")

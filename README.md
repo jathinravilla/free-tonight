@@ -42,8 +42,9 @@ Built for the [Cubbie Hackathon](https://hackathon.cubbie.ai), Track 3 (Group Ch
 6. **Round 4, place.** Places are ranked against the pooled filters; every agent judges the proposal against
    its owner's real profile and answers accept or decline with a category (budget, distance, food).
 7. **Round 5, vote.** If two or more options tie, the group gets a one-tap poll.
-8. **Round 6, verdict.** Each agent already knows from its owner's schedule whether they're free, so nobody double-checks. The bot posts right away: "✅ It works out! Going (9): … · Busy then (1): …" (or why it doesn't). Plans change? Tap **Can't go** on the card.
-9. **Locked.** One card in the channel, updated in place the whole time: time, place, who's going, cost per
+8. **Place.** The group names the place: type it in `/plan place:` or tap **📍 Set place** on the card (with minutes from campus). Listed places that fit everyone's filters show only as suggestions.
+9. **Round 6, verdict.** Each agent already knows from its owner's schedule whether they're free, so nobody double-checks. The bot posts right away: "✅ It works out! Going (9): … · Busy then (1): …" (or why it doesn't). Plans change? Tap **Can't go** on the card.
+10. **Locked.** One card in the channel, updated in place the whole time: time, place, who's going, cost per
    person, and buttons for 📅 calendar invite, 📋 copy card (paste into iMessage or GroupMe), 🔒 privacy ledger
    and 💸 bill split.
 

@@ -19,8 +19,10 @@ def copy_card(r: PlanResult) -> str:
     lines = [f"{act.emoji} {p.kind.title()} plan",
              f"📅 {when_line(p.start, p.end)}"]
     if p.venue:
-        lines.append(f"📍 {p.venue.name}" + (f" ({p.venue.area})" if p.venue.area else ""))
-        lines.append(f"💸 about ${p.venue.price_pp:.0f} each" if p.venue.price_pp else "💸 free")
+        lines.append(f"📍 {p.venue.name}" + (f" ({p.venue.area})" if p.venue.area else "")
+                     + (f" · {p.venue.distance}" if p.venue.walk_min else ""))
+        if not p.venue.custom:
+            lines.append(f"💸 about ${p.venue.price_pp:.0f} each" if p.venue.price_pp else "💸 free")
     else:
         lines.append("📍 place TBD, pick one in chat")
     who = [", ".join(r.confirmed)] if r.confirmed else []

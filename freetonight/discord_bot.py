@@ -29,7 +29,7 @@ from .timeutil import DAYS
 from .split import format_split, split_bill, split_even
 from .store import ProfileStore
 from .timeutil import fmt_clock
-from .venues import FOOD_KINDS, load_venues
+from .venues import FOOD_KINDS, Venue, load_venues
 
 log = logging.getLogger("freetonight")
 
@@ -428,9 +428,10 @@ class PlanRun:
     """One /plan in one channel: join phase, negotiation, result."""
 
     def __init__(self, bot: "FreeTonightBot", channel: discord.abc.Messageable, host: discord.Member,
-                 activity: str, when: str, minutes: int | None):
+                 activity: str, when: str, minutes: int | None, place: str | None = None):
         self.bot, self.channel, self.host = bot, channel, host
         self.activity, self.when, self.minutes = activity, when, minutes
+        self.place = custom_place(place, activity) if place and place.strip() else None
         self.members: dict[int, discord.abc.User] = {host.id: host}
         self.message: discord.Message | None = None
         self.stage = "joining"
@@ -457,6 +458,8 @@ class PlanRun:
             return e
         e = discord.Embed(title=f"{a.emoji} {a.name.title()} {when_label}?", colour=ORANGE)
         names = ", ".join(m.display_name for m in self.members.values())
+        if self.place:
+            e.add_field(name="Where", value=f"📍 {self.place.name}", inline=False)
         e.add_field(name=f"In ({len(self.members)})", value=names, inline=False)
         if self.stage == "joining":
             e.description = (f"Tap **I'm in**. Your agent shares only when you're free, never why.\n"
@@ -510,7 +513,8 @@ class PlanRun:
             agents.append(PersonalAgent(profile, make_ask()))
         session = PlanSession(agents, self.host.display_name, self.activity,
                               dates, self.bot.venues, minutes=self.minutes,
-                              now=now, progress=self.progress, poll=self.poll, confirm=False)
+                              now=now, progress=self.progress, poll=self.poll, confirm=False,
+                              auto_place=False, place=self.place)
         try:
             self.result = await session.run()
         except Exception:
@@ -530,7 +534,9 @@ class PlanRun:
             return ("❌ **It doesn't work out this time.** There's no time when 2 or more of you are free. "
                     "Try `/plan` with *this week* or a shorter hangout.")
         going = [m.mention for m in self.members.values() if m.display_name in r.confirmed]
-        lines = [f"✅ **It works out!** {r.plan.label}",
+        v = r.plan.venue
+        lines = [f"✅ **It works out!** {r.plan.kind.title()} · {cards.when_line(r.plan.start, r.plan.end)}",
+                 f"📍 {v.name} · {v.distance}" if v else "📍 Place not picked yet: tap **Set place** on the card.",
                  f"🙋 Going ({len(going)}): " + " ".join(going)]
         if r.unavailable:
             lines.append(f"🚫 Busy then ({len(r.unavailable)}): " + ", ".join(r.unavailable))
@@ -685,7 +691,10 @@ class PollView(discord.ui.View):
 def locked_embed(r: PlanResult) -> discord.Embed:
     p = r.plan
     a = ACTIVITIES[p.kind]
-    desc = f"**{cards.when_line(p.start, p.end)}**"
+    v = p.venue
+    where = (f"📍 **{v.name}** · {v.distance}" if v
+             else "📍 **Place not picked yet.** Tap **Set place** to add one.")
+    desc = f"{where}\n🕒 **{cards.when_line(p.start, p.end)}**"
     if len(r.confirmed) + len(r.maybe) < 2:
         title, colour = f"{a.emoji} Fell through", GRAY
         desc += "\nFewer than 2 people can go now. Start a new /plan to try another time."
@@ -695,13 +704,11 @@ def locked_embed(r: PlanResult) -> discord.Embed:
         title, colour = f"{a.emoji} {p.kind.title()} is penciled in", ORANGE
         desc += "\nEveryone said maybe. It's on the card so nobody forgets; tap 📅 if you're going."
     e = discord.Embed(title=title, colour=colour, description=desc)
-    if not p.venue:
-        e.add_field(name="Where", value="No listed place fits everyone then, so pick a spot in chat.", inline=False)
-    else:
-        e.add_field(name="Where", value=f"{p.venue.name}" + (f" · {p.venue.area}" if p.venue.area else "")
-                    + f"\n{p.venue.walk_min} min walk", inline=True)
-        e.add_field(name="Cost", value=f"about ${p.venue.price_pp:.0f} each" if p.venue.price_pp else "free",
-                    inline=True)
+    if v and not v.custom:
+        e.add_field(name="Cost", value=f"about ${v.price_pp:.0f} each" if v.price_pp else "free", inline=True)
+    if not v and r.suggestions:
+        e.add_field(name="Ideas that fit everyone (just suggestions)", inline=False, value="\n".join(
+            f"• {s.name} · {s.distance} · about ${s.price_pp:.0f}" for s in r.suggestions))
     going = ", ".join(r.confirmed) or "—"
     e.add_field(name=f"Going ({len(r.confirmed)})", value=going, inline=False)
     if r.maybe:
@@ -750,6 +757,14 @@ class LockedView(discord.ui.View):
     async def split(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.send_modal(SplitModal(self.result.confirmed + self.result.maybe))
 
+    @discord.ui.button(label="Set place", emoji="📍", style=discord.ButtonStyle.primary, row=1)
+    async def set_place(self, interaction: discord.Interaction, _: discord.ui.Button):
+        r = self.result
+        if interaction.user.display_name not in r.confirmed + r.maybe + r.declined:
+            await interaction.response.send_message("Only people in this plan can set the place.", ephemeral=True)
+            return
+        await interaction.response.send_modal(PlaceModal(self))
+
     @discord.ui.button(label="Can't go", emoji="✋", style=discord.ButtonStyle.danger, row=1)
     async def cant(self, interaction: discord.Interaction, _: discord.ui.Button):
         r, name = self.result, interaction.user.display_name
@@ -772,6 +787,40 @@ class LockedView(discord.ui.View):
         if len(r.confirmed) + len(r.maybe) < 2 and name in r.declined:
             await interaction.followup.send(f"Heads up: with {name} out, fewer than 2 people are going. "
                                             "Start a new `/plan` if you still want to hang out.")
+
+
+def custom_place(name: str, activity: str, minutes: int = 0) -> Venue:
+    clean = " ".join(name.replace("`", "'").split())[:100]
+    return Venue(name=clean, kinds=[activity], price_pp=0, walk_min=minutes, custom=True)
+
+
+class PlaceModal(discord.ui.Modal, title="Where are we going?"):
+    name = discord.ui.TextInput(label="Place name", placeholder="Chipotle on Main St", max_length=100)
+    minutes = discord.ui.TextInput(label="Minutes from campus (optional)", placeholder="10", required=False,
+                                   max_length=3)
+
+    def __init__(self, view: "LockedView"):
+        super().__init__()
+        self.view = view
+        v = view.result.plan.venue
+        if v:
+            self.name.default = v.name
+            self.minutes.default = str(v.walk_min) if v.walk_min else ""
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            mins = int(parse_money(self.minutes.value)) if self.minutes.value.strip() else 0
+        except ValueError:
+            mins = 0
+        r = self.view.result
+        r.plan.venue = custom_place(self.name.value, r.plan.kind, max(0, min(mins, 180)))
+        r.cost_pp = 0.0
+        r.ledger.add("7 · Changes", interaction.user.display_name, "table", "place",
+                     f"{interaction.user.display_name} set the place: {r.plan.venue.name}",
+                     shared={"place": r.plan.venue.name}, human=True)
+        await interaction.response.edit_message(embed=locked_embed(r), view=self.view)
+        await interaction.followup.send(f"📍 {interaction.user.display_name} set the place: "
+                                        f"**{r.plan.venue.name}** ({r.plan.venue.distance}).")
 
 
 class SplitModal(discord.ui.Modal, title="Split the bill"):
@@ -880,10 +929,12 @@ def register_commands(bot: FreeTonightBot) -> None:
 
     @tree.command(name="plan", description="Plan a hangout with this group")
     @app_commands.describe(activity="What are we doing?", when="Which days to look at",
-                           minutes="How long (optional; defaults per activity)")
+                           minutes="How long (optional; defaults per activity)",
+                           place="Where? Type a name, or leave empty and set it on the card later")
     @app_commands.choices(activity=ACTIVITY_CHOICES, when=WHEN_CHOICES)
     async def plan_cmd(interaction: discord.Interaction, activity: app_commands.Choice[str],
-                       when: app_commands.Choice[str], minutes: app_commands.Range[int, 30, 300] | None = None):
+                       when: app_commands.Choice[str], minutes: app_commands.Range[int, 30, 300] | None = None,
+                       place: app_commands.Range[str, 1, 100] | None = None):
         old = bot.runs.get(interaction.channel_id)
         if old and not old.started and (old.host.id == interaction.user.id
                                         or (datetime.now() - old.created).total_seconds() > JOIN_SECONDS):
@@ -898,7 +949,7 @@ def register_commands(bot: FreeTonightBot) -> None:
                 f"{old.host.display_name}'s plan is still going in this channel. Join that one, or wait for it "
                 "to finish.", ephemeral=True)
             return
-        run = PlanRun(bot, interaction.channel, interaction.user, activity.value, when.value, minutes)
+        run = PlanRun(bot, interaction.channel, interaction.user, activity.value, when.value, minutes, place)
         if not bot.store.get(str(interaction.user.id)):
             async def after(i: discord.Interaction, profile: Profile):
                 bot.runs[interaction.channel_id] = run
