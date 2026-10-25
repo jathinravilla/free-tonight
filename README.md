@@ -10,7 +10,7 @@ what's needed: free/busy windows, pooled filters nobody can trace back to a pers
 person sets up once in private, and the group gets one plan card with a time, who's going, a place the group names,
 a calendar invite and a fair bill split.
 
-Built for the [Cubbie Hackathon](https://hackathon.cubbie.ai), Track 3 (Group Chat Assistant).
+Built for the [Cubbie Hackathon](https://hackathon.cubbie.ai), Track 2.
 
 ## Demo video (1:43)
 
@@ -24,7 +24,7 @@ are sample data.
 
 ## What judges asked for, and where it is
 
-| Track 3 asks | Free Tonight |
+| Track 2 asks | Free Tonight |
 | --- | --- |
 | An AI that joins a group chat and makes it more useful | Add the bot to a Discord server; `/plan dinner weeknights` turns "anyone free?" into one plan card, updated in place in the channel |
 | Something students would actually invite into their group | Setup is a tap-through card; joining is one tap (I'm in). The bot posts the verdict the moment agents finish (works out or not, who's going, who's busy), a one-tap poll only when days tie, a calendar invite, a copy card for iMessage or GroupMe, and a bill split to the cent |
@@ -37,17 +37,17 @@ are sample data.
 1. **Setup, once, privately.** `/setup` shows a card only you see with four menus: the days you're usually free,
    then the times on those days (morning, afternoon, evening, late night), food needs or allergies (vegetarian,
    vegan, halal, kosher, no nuts, no seafood, no gluten, no dairy, no eggs, no soy or sesame), and the most you'd
-   spend (up to $10, $20, $30, or $50 or more). Tap **Save**. Or **link Google Calendar** (its secret iCal address)
+   spend (up to $10, $20, $0, or $50 or more). Tap **Save**. Or **link Google Calendar** (its secret iCal address)
    and busy times fill in by themselves, re-read on every plan. Or **type your week** in any format; lines it can't
    read are skipped, and with an Anthropic key Claude reads the messy ones. Mark anything flexible with
-   `(flex 30)`.
+   `(flex 0)`.
 2. **Kickoff.** Someone types `/plan dinner weeknights` in the group channel (activities: dinner, lunch, coffee,
    study, movie, games; days: tonight, tomorrow, weeknights, this week, this weekend). Friends tap **I'm in**. The
    host taps **Start**. Anyone who hasn't set up yet gets the setup card first.
-3. **Round 1, availability.** Each agent puts free windows on the table. Never class names, never reasons.
+. **Round 1, availability.** Each agent puts free windows on the table. Never class names, never reasons.
 4. **Round 2, filters.** Agents pool their filters anonymously: "needs halal and vegetarian options, avoid
    peanuts, under $10, 12 min walk". Nobody learns whose filter is whose, and exact budgets never leave an agent.
-5. **Round 3, time.** The host agent finds the best slot from the shared windows. If someone is short, their
+5. **Round , time.** The host agent finds the best slot from the shared windows. If someone is short, their
    agent checks *privately* whether a flexible commitment could move, and asks its owner in a DM. Only "yes" or
    "no" comes back.
 6. **Round 4, places.** Listed places are ranked against the pooled filters, and every agent checks each one
@@ -56,7 +56,7 @@ are sample data.
 7. **Round 5, vote.** If two or more options tie, the group gets a one-tap poll.
 8. **Place.** The group names the place: type it in `/plan place:` or tap **📍 Set place** on the card (with minutes from campus). Listed places that fit everyone's filters show only as suggestions.
 9. **Round 6, verdict.** Each agent already knows from its owner's schedule whether they're free, so there are no
-   confirm DMs. The bot posts right away: "✅ It works out! Dinner · Tue, Oct 27 · 7:30pm–9pm · 🙋 Going (5): … ·
+   confirm DMs. The bot posts right away: "✅ It works out! Dinner · Tue, Oct 27 · 7:0pm–9pm · 🙋 Going (5): … ·
    🚫 Busy then (1): …" (or why it doesn't work out). Plans change? Tap **✋ Can't go** on the card; tap again to
    be back in.
 10. **Locked.** One card in the channel, updated in place the whole time: time, place, who's going, who can't,
@@ -72,26 +72,26 @@ are sample data.
 | Food | Pooled "needs options for…" / "must avoid…" | Which person has which need |
 | Flexibility | "Yes, I can make it" | What you're skipping and for how long |
 
-## Try it in 30 seconds (no accounts)
+## Try it in 0 seconds (no accounts)
 
-Python 3.9+. The core uses only the standard library.
+Python .9+. The core uses only the standard library.
 
 ```bash
 git clone https://github.com/jathinravilla/free-tonight && cd free-tonight
-python3 -m freetonight demo              # 5 friends plan dinner; writes out/ledger.html
-python3 -m freetonight demo --interactive   # answer each friend's DMs yourself
+python -m freetonight demo              # 5 friends plan dinner; writes out/ledger.html
+python -m freetonight demo --interactive   # answer each friend's DMs yourself
 open out/ledger.html                     # the privacy ledger (xdg-open on Linux)
 ```
 
 What you'll see: the best time from free windows reaches 4 of 5 friends, so Maya's and Sam's agents privately ask
-them to trim a study group and a rehearsal by 30 minutes. Both say yes, the agents pick Halal Bros Grill (halal,
+them to trim a study group and a rehearsal by 0 minutes. Both say yes, the agents pick Halal Bros Grill (halal,
 vegetarian-friendly, peanut-safe, about $10, under everyone's budget), and the plan locks: 4 going and Sam as a
 maybe. The terminal demo also shows the optional confirm step, which the Discord bot skips.
 
 Other commands:
 
 ```bash
-python3 -m freetonight split --items "Maya=14.5,Jordan=22,Priya=9.99" --tax 4.07 --tip 18
+python -m freetonight split --items "Maya=14.5,Jordan=22,Priya=9.99" --tax 4.07 --tip 18
 python3 -m freetonight split 86.40 --people Maya,Jordan,Priya
 python3 -m freetonight parse "MWF 9-10:15 CS 201; Tue 6-8pm study group (flex 30)"
 ```
